@@ -1,0 +1,6 @@
+#+title: Todo
+
+* TODO Authentication
+We might just use IPSec though
+* TODO Is a simple HTTP REST service otherwise sufficient as a wire protocol?
+* TODO Create go bindings to liblldpctl rather than calling the commandline tool?
