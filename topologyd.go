@@ -45,7 +45,14 @@ func handle_lldp_request(w http.ResponseWriter, req *http.Request) {
 // responses to keep the rest of the logic clean
 func http_get(host string, path string) []byte {
     // send request
-    url := fmt.Sprintf("http://%s:%d%s", host, port, path)
+    const frag = "%25br0" //%25 = %
+
+    var url string
+    if host != "localhost" {
+        url = fmt.Sprintf("http://[%s%s]:%d%s", host, frag, port, path)
+    } else {
+        url = fmt.Sprintf("http://%s:%d%s", host, port, path)
+    }
     resp, err := http.Get(url)
     if err != nil {
         log.Printf("Error querying %s: %s\n", url, err)
