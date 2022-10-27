@@ -51,7 +51,7 @@ type ChassisInfo struct {
 					Value string `json:"value,omitempty"`
 				} `json:"id,omitempty"`
 				Descr      string   `json:"descr,omitempty"`
-				MgmtIP     []string `json:"mgmt-ip,omitempty"`
+				MgmtIP     string `json:"mgmt-ip,omitempty"`
 				Capability []struct {
 					Type    string `json:"type,omitempty"`
 					Enabled bool   `json:"enabled,omitempty"`

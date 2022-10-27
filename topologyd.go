@@ -3,7 +3,7 @@ package main
 import (
     "fmt"
     "time"
-    "io"
+    "io/ioutil"
     "log"
     "net/http"  // Currently communicates only over a simple HTTP interface
 )
@@ -68,7 +68,7 @@ func http_get(host string, path string) []byte {
     }
 
     // read response body
-    body, err := io.ReadAll(resp.Body)
+    body, err := ioutil.ReadAll(resp.Body)
     if err != nil {
         log.Printf("Error reading response body for GET %s: %s\n", url, err)
         return nil
@@ -102,7 +102,7 @@ func get_localhost_mgmt_ip() string {
         log.Print(err)
     }
 
-    return (*chassisptr).LocalChassis.Chassis.Dc3500.MgmtIP[0]
+    return (*chassisptr).LocalChassis.Chassis.Dc3500.MgmtIP
 }
 
 // Crawl the entire network for LLDP neighbors
