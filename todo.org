@@ -3,4 +3,11 @@
 * TODO Authentication
 We might just use IPSec though
 * TODO Is a simple HTTP REST service otherwise sufficient as a wire protocol?
-* TODO Create go bindings to liblldpctl rather than calling the commandline tool?
+It probably is, but it might also make sense to think about it and use the same
+protocol as the rest of the stack
+* NO Create go bindings to liblldpctl rather than calling the commandline tool?
+Seems like pointless overkill that doesn't add much value
+* TODO How to handle network failures?
+2022/10/27 11:23:58 Error querying http://172.29.201.1:9090/lldp/neighbors: Get "http://172.29.201.1:9090/lldp/neighbors": dial tcp 172.29.201.1:9090: i/o timeout
+* TODO Add retries to HTTP GET?
+* TODO Parallelize GET requests with goroutines
