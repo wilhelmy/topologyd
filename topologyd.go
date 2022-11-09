@@ -125,10 +125,10 @@ func gather_neighbors_from_nodes() {
     for {
         log.Print(todo)
         var cur []NeighborInterface = get_node_neighbor_info(ip)
-        if cur == nil {goto next} // error is logged in function call
+        if cur == nil || ip == "" {goto next} // error is logged in function call
         neighbors[ip] = &cur
 
-        for i, _ := range cur {
+        for i, _ := range cur { // loop over all found neighbors
             newip := cur[i].Chassis.Dc3500.MgmtIP
 
             _, found := neighbors[newip]

@@ -126,7 +126,7 @@ func lldp_parse_chassis_data(b []byte) (*ChassisInfo, error) {
 	return &c, nil
 }
 
-// parses "lldpcli -f json show chassis" output, returns en0+en1 netif member
+// parses "lldpcli -f json show neighbors" output, returns en0+en1 netif member
 // struct as a slice
 func lldp_parse_neighbor_data(b []byte) ([]NeighborInterface, error) {
 	var n NeighborInfo
