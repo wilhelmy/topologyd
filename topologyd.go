@@ -5,15 +5,29 @@ import (
     "time"
     "io/ioutil"
     "log"
-    "net/http"  // Currently communicates only over a simple HTTP interface
+    "strings"
+    "net/http"
 )
 
+/**** Configuration section ***********************************************************/
+// XXX Most of these will be commandline flags in release, some will go away
+// Listen port for HTTP queries
+const port = 9090
+// On dc3500, this is br0. For development on PC, it's the network interface connected to the DC3500 LAN.
+const netif_link_local_ipv6 = "enp3s0"
+// Set to an IP address to use as a starting point. In production, this would be "localhost"
+const start_host = "fe80::6055:f4ff:fe3c:c3fc"
+// Special treatment for dc3500 hostname (other names are logged specially)
+const known_relevant_chassis_name = "dc3500"
+
+/**** Debug section *******************************************************************/
 const dbg_http_query_verbose = false
 
-const port = 9090
+/**** Constants ***********************************************************************/
 const lldp_neighbor_path = "/lldp/neighbors"
 const lldp_chassis_path  = "/lldp/chassis"
 
+/**** HTTP code ***********************************************************************/
 // Handler function for incoming HTTP requests to query the local node's
 // chassis or neighbor info
 func handle_lldp_request(w http.ResponseWriter, req *http.Request) {
@@ -44,16 +58,18 @@ func handle_lldp_request(w http.ResponseWriter, req *http.Request) {
 // Send HTTP GET requests to specified node, logs errors and discards malformed
 // responses to keep the rest of the logic clean
 func http_get(host string, path string) []byte {
-    // send request
-    const frag = "%25br0" //%25 = %
-
+    if host == "" {
+        log.Printf("http_get called with empty host")
+        return []byte{}
+    }
     var url string
-    if host != "localhost" {
+    if strings.ToLower(host[:5]) == "fe80:" {
+        const frag = "%25" + netif_link_local_ipv6 //%25 = %
         url = fmt.Sprintf("http://[%s%s]:%d%s", host, frag, port, path)
     } else {
         url = fmt.Sprintf("http://%s:%d%s", host, port, path)
     }
-    resp, err := http.Get(url)
+    resp, err := http.Get(url) // send request
     if err != nil {
         log.Printf("Error querying %s: %s\n", url, err)
         return nil
@@ -85,8 +101,9 @@ func http_get(host string, path string) []byte {
     return body
 }
 
+/**** LLDP-HTTP interface *************************************************************/
 // the more wrappers, the better, right?
-func get_node_neighbor_info(host string) []NeighborInterface {
+func get_node_neighbor_info(host string) []NeighborSource {
     data := http_get(host, lldp_neighbor_path)
     if data == nil { return nil }
 
@@ -99,17 +116,43 @@ func get_node_neighbor_info(host string) []NeighborInterface {
     return ifaces
 }
 
+// Extracts a hopefully suitable chassis from a chassis map
+func get_chassis(c ChassisMap) (ChassisMember, error) {
+    if len(c) > 1 {
+        return ChassisMember{},
+            fmt.Errorf("This strange machine reports more than 1 chassis: %s", c)
+    }
+    // centralize all this hardcoded ugliness in one spot
+    if val, ok := c[known_relevant_chassis_name]; ok {
+        return val, nil
+    }
+    // fallback: machine doesn't self-identify as DC3500 or hostname changed
+    // return the first chassis found
+    for k, v := range c {
+        log.Printf("Found machine '%s' which is seemingly not a DC3500: %s", k, c)
+        return v, nil
+    }
+    return ChassisMember{},
+        fmt.Errorf("This strange machine reports less than 1 chassis: %s", c)
+}
+
 func get_localhost_mgmt_ip() string {
-    const host = "localhost"
+    const host = start_host
     data := http_get(host, lldp_chassis_path)
     if data == nil { return "" }
 
     chassisptr, err := lldp_parse_chassis_data(data)
     if err != nil {
-        log.Print(err)
+        log.Println(err)
+        return ""
     }
 
-    return (*chassisptr).LocalChassis.Chassis.Dc3500.MgmtIP
+    chassis, err := get_chassis((*chassisptr).LocalChassis.Chassis)
+    if err != nil {
+        log.Printf("machine %s: error %s", host, err)
+    }
+
+    return get_mgmt_ip(&chassis)
 }
 
 // Crawl the entire network for LLDP neighbors
@@ -117,19 +160,25 @@ func gather_neighbors_from_nodes() {
     // preallocate this many hashtable entries
     const prealloc = 32
     // hashmap keyed by MgmtIP addresses
-    neighbors := make(map[string]*[]NeighborInterface, prealloc)
+    neighbors := make(map[string]*[]NeighborSource, prealloc)
 
     ip   := get_localhost_mgmt_ip()
     todo := []string{ ip }
 
     for {
-        log.Print(todo)
-        var cur []NeighborInterface = get_node_neighbor_info(ip)
+        log.Print("todo", todo)
+        var cur []NeighborSource = get_node_neighbor_info(ip)
         if cur == nil || ip == "" {goto next} // error is logged in function call
         neighbors[ip] = &cur
 
         for i, _ := range cur { // loop over all found neighbors
-            newip := cur[i].Chassis.Dc3500.MgmtIP
+            chassis, err := get_chassis(cur[i].Iface.Chassis)
+            if err != nil {
+                log.Printf("machine %s: error %s", ip, err)
+            }
+
+            newip := get_mgmt_ip(&chassis)
+            if newip == "" {continue}
 
             _, found := neighbors[newip]
             if !found {
@@ -149,13 +198,18 @@ func gather_neighbors_from_nodes() {
     log.Print("here")
 }
 
+/**** Main loop ***********************************************************************/
 func main() {
+    // add file name + line number to log output
+    log.SetFlags(log.LstdFlags | log.Lshortfile)
+
     http.HandleFunc(lldp_neighbor_path, handle_lldp_request)
     http.HandleFunc(lldp_chassis_path,  handle_lldp_request)
 
     // start separate goroutine for httpd
     go http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
 
+    // XXX For development purposes
     time.Sleep(1)
     gather_neighbors_from_nodes()
     for {

@@ -1,0 +1,16 @@
+This so named topology daemon:
+
+   - Has a simple HTTP service listening on a port (default: 9090) on which one
+     can query LLDP chassis and neighbor information as seen from this host
+
+   - It then uses the MgmtIP addresses reported by its starting host to walk all
+     nodes on the network to get all their neighbors via this HTTP service
+
+   - It then assembles the network neighborhood into a graph
+
+All nodes that are meant to be mapped need lldpd running to find their
+neighbors, lldpcli(1) in $PATH and this daemon's HTTP service running on the
+same port across the network.
+
+There is currently no authentication or request rate-limiting, do not deploy
+unless you know what you're doing.
