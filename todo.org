@@ -2,12 +2,164 @@
 
 * TODO Authentication
 We might just use IPSec though
-* TODO Is a simple HTTP REST service otherwise sufficient as a wire protocol?
+* DONE Is a simple HTTP REST service otherwise sufficient as a wire protocol?
 It probably is, but it might also make sense to think about it and use the same
 protocol as the rest of the stack
 * NO Create go bindings to liblldpctl rather than calling the commandline tool?
 Seems like pointless overkill that doesn't add much value
-* TODO How to handle network failures?
+* TODO How to handle network failures? Timeouts?
+#+begin_example
 2022/10/27 11:23:58 Error querying http://172.29.201.1:9090/lldp/neighbors: Get "http://172.29.201.1:9090/lldp/neighbors": dial tcp 172.29.201.1:9090: i/o timeout
+#+end_example
 * TODO Add retries to HTTP GET?
 * TODO Parallelize GET requests with goroutines
+* TODO Handle "500 internal server error" if lldpcli can't be executed on the machine
+#+begin_src shell :results output
+curl -v localhost:9090/lldp/chassis 2>&1 | tr -d \\r
+#+end_src
+
+#+RESULTS:
+#+begin_example
+,*   Trying 127.0.0.1:9090...
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0* Connected to localhost (127.0.0.1) port 9090 (#0)
+> GET /lldp/chassis HTTP/1.1
+> Host: localhost:9090
+> User-Agent: curl/7.83.1
+> Accept: */*
+>
+,* Mark bundle as not supporting multiuse
+< HTTP/1.1 500 Internal Server Error
+< Date: Thu, 10 Nov 2022 20:27:49 GMT
+< Content-Length: 0
+<
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+,* Connection #0 to host localhost left intact
+#+end_example
+* TODO Handle lldpcli output where chassis is flattened instead of having a hostname substructure
+Not sure why this happens but it does sometimes and it trips the JSON parser
+#+begin_example
+$ go run .
+2022/11/22 01:31:52 topologyd.go:81: HTTP response for GET http://[fe80::6055:f4ff:fe3c:c3fc%25enp3s0]:9090/lldp/chassis: &{200 OK %!s(int=200) HTTP/1.1 %!s(int=1) %!s(int=1) map[Content-Length:[715] Content-Type:[application/json] Date:[Tue, 22 Nov 2022 00:26:38 GMT]] %!s(*http.bodyEOFSignal=&{0xc000196000 {0 0} false <nil> 0x635de0 0x635ee0}) %!s(int64=715) [] %!s(bool=false) %!s(bool=false) map[] %!s(*http.Request=&{GET 0xc0000de000 HTTP/1.1 1 1 map[] <nil> <nil> 0 [] false [fe80::6055:f4ff:fe3c:c3fc%enp3s0]:9090 map[] map[] <nil> map[]   <nil> <nil> <nil> 0xc000022108}) %!s(*tls.ConnectionState=<nil>)}
+2022/11/22 01:31:52 topologyd.go:103: Body: {
+  "local-chassis": {
+    "chassis": {
+      "dc3500": {
+        "id": {
+          "type": "mac",
+          "value": "fe:51:ab:5a:60:62"
+        },
+        "descr": "DET Wayland dunfell-6.0-39-g7f433c3 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64",
+        "mgmt-ip": "fe80::6055:f4ff:fe3c:c3fc",
+        "capability": [
+          {
+            "type": "Bridge",
+            "enabled": true
+          },
+          {
+            "type": "Router",
+            "enabled": false
+          },
+          {
+            "type": "Wlan",
+            "enabled": false
+          },
+          {
+            "type": "Station",
+            "enabled": false
+          }
+        ]
+      }
+    }
+  }
+}
+
+
+2022/11/22 01:31:52 topologyd.go:81: HTTP response for GET http://[fe80::6055:f4ff:fe3c:c3fc%25enp3s0]:9090/lldp/neighbors: &{200 OK %!s(int=200) HTTP/1.1 %!s(int=1) %!s(int=1) map[Content-Length:[1679] Content-Type:[application/json] Date:[Tue, 22 Nov 2022 00:26:38 GMT]] %!s(*http.bodyEOFSignal=&{0xc000134080 {0 0} false <nil> 0x635de0 0x635ee0}) %!s(int64=1679) [] %!s(bool=false) %!s(bool=false) map[] %!s(*http.Request=&{GET 0xc00018a6c0 HTTP/1.1 1 1 map[] <nil> <nil> 0 [] false [fe80::6055:f4ff:fe3c:c3fc%enp3s0]:9090 map[] map[] <nil> map[]   <nil> <nil> <nil> 0xc000022108}) %!s(*tls.ConnectionState=<nil>)}
+2022/11/22 01:31:52 topologyd.go:103: Body: {
+  "lldp": {
+    "interface": [
+      {
+        "en0": {
+          "via": "LLDP",
+          "rid": "1",
+          "age": "0 day, 00:39:51",
+          "chassis": {
+            "id": {
+              "type": "mac",
+              "value": "9e:52:ec:13:ab:91"
+            }
+          },
+          "port": {
+            "id": {
+              "type": "mac",
+              "value": "00:07:8e:ff:ea:1d"
+            },
+            "descr": "en1",
+            "ttl": "120"
+          }
+        }
+      },
+      {
+        "en1": {
+          "via": "LLDP",
+          "rid": "2",
+          "age": "0 day, 00:04:39",
+          "chassis": {
+            "dc3500": {
+              "id": {
+                "type": "mac",
+                "value": "9e:52:ec:13:ab:92"
+              },
+              "descr": "DET Wayland dunfell-6.0-39-g7f433c3 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64",
+              "mgmt-ip": "fe80::346a:32ff:fed4:be3a",
+              "capability": [
+                {
+                  "type": "Bridge",
+                  "enabled": true
+                },
+                {
+                  "type": "Router",
+                  "enabled": false
+                },
+                {
+                  "type": "Wlan",
+                  "enabled": false
+                },
+                {
+                  "type": "Station",
+                  "enabled": false
+                }
+              ]
+            }
+          },
+          "port": {
+            "id": {
+              "type": "mac",
+              "value": "9e:52:ec:13:ab:92"
+            },
+            "descr": "en0",
+            "ttl": "120"
+          }
+        }
+      }
+    ]
+  }
+}
+
+
+2022/11/22 01:31:52 topologyd.go:139: Found machine 'id' which is seemingly not a dc3500: map[id:{{ }  [] []}]
+panic: runtime error: index out of range [0] with length 0
+
+goroutine 1 [running]:
+main.get_mgmt_ip(0x0)
+        /home/mw/src/topologyd/lldpcli-json.go:140 +0xbf
+main.gather_neighbors_from_nodes()
+        /home/mw/src/topologyd/topologyd.go:206 +0x5ac
+main.main()
+        /home/mw/src/topologyd/topologyd.go:306 +0x12e
+exit status 2
+
+#+end_example
+* TODO Add testsuite

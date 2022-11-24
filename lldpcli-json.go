@@ -120,8 +120,11 @@ func fix_mgmt_ip(chassis *ChassisMember) {
 		}
 		(*chassis).MgmtIP = ips
 		break
+	case nil:
+		(*chassis).MgmtIP = []string{}
+		break
 	default: // this shouldn't happen since interface{} supposedly handles all types
-		log.Println("Error: this code should be unreachable")
+		log.Printf("Error: this code should be unreachable. Got %T instead of string-ish type", vv)
 		(*chassis).MgmtIP = []string{}
 	}
 }
@@ -133,7 +136,11 @@ func get_mgmt_ip(chassis *ChassisMember) string {
 	if !ok {
 		log.Printf("MgmtIP[]: Expected []string, got %T (%s)", (*chassis).MgmtIP, (*chassis).MgmtIP)
 		return ""
+	} else if len(ips) < 1 {
+		log.Printf("MgmtIP[]: No IP address found for chassis %+v (all empty?)", *chassis)
+		return ""
 	}
+
 	return ips[0]
 }
 
@@ -194,4 +201,19 @@ func lldp_parse_neighbor_data(b []byte) ([]NeighborSource, error) {
 	}
 
 	return ifaces, nil
+}
+
+func get_neighbor_mgmt_ips(src *[]NeighborSource) *[]string {
+	res := make([]string, len(*src))
+
+	for i, v := range *src {
+		chassis, err := get_chassis(v.Iface.Chassis)
+		if err != nil {
+			log.Printf("Error: %s", err)
+			continue
+		}
+		res[i] = get_mgmt_ip(&chassis)
+	}
+
+	return &res
 }
