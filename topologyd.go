@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -9,20 +10,22 @@ import (
 	"strings"
 )
 
-/**** Configuration section ***********************************************************/
-// XXX Most of these will be commandline flags in release, some will go away
+/**** Commandline arguments section ***************************************************/
 // Listen port for HTTP queries
-const port = 9090
+var port int
+
 // On dc3500, this is br0. For development on PC, it's the network interface connected to the DC3500 LAN.
-const netif_link_local_ipv6 = "enp3s0"
-// Set to an IP address to use as a starting point. In production, this would be "localhost"
-//const start_host = "fe80::6055:f4ff:fe3c:c3fc"
-//const start_host = "fe80::346a:32ff:fed4:be3a"
-const start_host = "fe80::5404:58ff:fed2:41b2"
+var netif_link_local_ipv6 string
+
+// Set to an IP address to use as a starting point. In production, this would be
+// "localhost". For development, it can be any machine running topologyd.
+var start_host string
+
 // Special treatment for dc3500 hostname (other names are logged specially)
-const known_relevant_chassis_name = "dc3500"
+var known_relevant_chassis_name string
+
 // Preallocate this many entries in the hashtable. Can be tuned in the future if networks are larger in practice.
-const nodes_prealloc = 32
+var nodes_prealloc int
 
 
 /**** Debug section *******************************************************************/
@@ -93,8 +96,13 @@ func http_get(host string, path string) []byte {
         return []byte{}
     }
     var url string
+    frag := ""
     if strings.ToLower(host[:5]) == "fe80:" {
-        const frag = "%25" + netif_link_local_ipv6 //%25 = %
+        // link local IPv6 address, need to append %netif or else it isn't valid
+        frag = "%25" + netif_link_local_ipv6 //%25 = %
+    }
+    if strings.Index(host, ":") >= 0 {
+        // IPv6 address
         url = fmt.Sprintf("http://[%s%s]:%d%s", host, frag, port, path)
     } else {
         url = fmt.Sprintf("http://%s:%d%s", host, port, path)
@@ -209,7 +217,7 @@ func dbg_gather(format string, arg... interface{}) {
     }
 }
 
-// Crawl the entire network for LLDP neighbors
+// Crawl the entire network for LLDP neighbors, returning a  slice of nodes
 func gather_neighbors_from_nodes() (string, *NodeMap) {
     // hashmap keyed by MgmtIP addresses, also used for tracking whether or not
     // a node has been queried before by setting its value to nil
@@ -372,11 +380,7 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
         buf.WriteString(fmt.Sprintf("\t\"%s\" [shape=box];\n", k))
     }
     for k, v := range *nodes {
-        if v == nil {
-            log.Printf("Error: neighbor '%s' has nil neighbors instead "+
-                "of empty list. This is a bug.", k)
-            continue
-        }
+        if v == nil {continue}
         neigh := graphviz_quote_array_of_strings(get_neighbor_mgmt_ips(v))
         buf.WriteString(fmt.Sprintf("\t\"%s\" -- { %s };\n", k, neigh))
     }
@@ -390,10 +394,26 @@ func main() {
     // add file name + line number to log output
     log.SetFlags(log.LstdFlags | log.Lshortfile)
 
+    // handle command line flags
+    flag.IntVar(    &port,           "port",                     9090, "listen port")
+    flag.IntVar(    &nodes_prealloc, "nodes-prealloc",             32, "expected maximum number of nodes in network for memory allocation")
+    flag.StringVar( &start_host,     "start-host",        "localhost", "start host for topology discovery")
+    flag.StringVar( &netif_link_local_ipv6, "netif",            "br0", "network interface to use for IPv6 LL traffic")
+    flag.StringVar( &known_relevant_chassis_name, "chassis", "dc3500", "hostnames other than this generate a warning if found")
+    flag.Parse()
+
+    if len(flag.Args()) > 0 {
+        log.Fatalf("Error: extra arguments on commandline: %v", flag.Args())
+    }
+
+    // initialize http handlers
     http.HandleFunc(lldp_neighbor_path, handle_lldp_request)
     http.HandleFunc(lldp_chassis_path,  handle_lldp_request)
 
     http.HandleFunc(graphviz_path,      handle_graphviz_request)
 
-    http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
+    // start httpd
+    if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
+        log.Println(err)
+    }
 }
