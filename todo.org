@@ -1,10 +1,12 @@
-#+title: Todo
+#+TITLE: TODO list for topologyd
+#+TODO: TODO(t) PROJ(p) LOOP(r) STRT(s) WAIT(w) HOLD(h) IDEA(i) | DONE(d) KILL(k) [ ](T) [-](S) [?](W) | [X](D) | OKAY(o) YES(y) NO(n)
 
 * TODO Authentication
-We might just use IPSec though
+We probably will just use IPSec because we need/want it elsewhere anyway
 * DONE Is a simple HTTP REST service otherwise sufficient as a wire protocol?
 It probably is, but it might also make sense to think about it and use the same
-protocol as the rest of the stack
+protocol as the rest of the stack, such as ZeroMQ/protobuf, should we decide to
+use it.
 * NO Create go bindings to liblldpctl rather than calling the commandline tool?
 Seems like pointless overkill that doesn't add much value
 * TODO How to handle network failures? Timeouts?
@@ -37,8 +39,9 @@ curl -v localhost:9090/lldp/chassis 2>&1 | tr -d \\r
   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
 ,* Connection #0 to host localhost left intact
 #+end_example
-* TODO Handle lldpcli output where chassis is flattened instead of having a hostname substructure
-Not sure why this happens but it does sometimes and it trips the JSON parser
+* DONE Handle lldpcli output where mgmt-ip is flattened instead of being of type array
+This happens if only one mgmt-ip is reported rather than multiple.
+Crazy inconsistency in lldpcli JSON output but I don't make the rules
 #+begin_example
 $ go run .
 2022/11/22 01:31:52 topologyd.go:81: HTTP response for GET http://[fe80::6055:f4ff:fe3c:c3fc%25enp3s0]:9090/lldp/chassis: &{200 OK %!s(int=200) HTTP/1.1 %!s(int=1) %!s(int=1) map[Content-Length:[715] Content-Type:[application/json] Date:[Tue, 22 Nov 2022 00:26:38 GMT]] %!s(*http.bodyEOFSignal=&{0xc000196000 {0 0} false <nil> 0x635de0 0x635ee0}) %!s(int64=715) [] %!s(bool=false) %!s(bool=false) map[] %!s(*http.Request=&{GET 0xc0000de000 HTTP/1.1 1 1 map[] <nil> <nil> 0 [] false [fe80::6055:f4ff:fe3c:c3fc%enp3s0]:9090 map[] map[] <nil> map[]   <nil> <nil> <nil> 0xc000022108}) %!s(*tls.ConnectionState=<nil>)}
@@ -134,7 +137,7 @@ $ go run .
               ]
             }
           },
-          "port": {
+          "port":
             "id": {
               "type": "mac",
               "value": "9e:52:ec:13:ab:92"
@@ -163,3 +166,42 @@ exit status 2
 
 #+end_example
 * TODO Add testsuite
+* HOLD What about the case when no lldp neighbors are found?
+Is the JSON output still parseable? -> No, but it does not raise an error.
+
+#+begin_example
+$ lldpcli -f json show neighbors
+{
+  "lldp": {
+
+  }
+}
+#+end_example
+
+Querying the topology in graphviz format for testing results in an empty graph.
+This is incorrect since there should be at least one node present. However it
+probably is not important, also is somewhat of a special case because there
+would be no links between nodes, which are essential for graphviz output.
+
+#+begin_example
+$ curl localhost:9090/topology/graphviz
+strict graph {
+}
+#+end_example
+
+topologyd stdout/stderr on the topic (running lldpd only on the dev machine with
+no dc3500 present in the network):
+
+#+begin_example
+$ go run . -netif enp3s0
+2023/01/11 21:39:56 topologyd.go:216: == Begin gathering neighbors ==
+2023/01/11 21:39:56 topologyd.go:44: Received HTTP GET from [::1]:55438 for /lldp/chassis
+2023/01/11 21:39:56 topologyd.go:177: Found machine 'greifswald' which is seemingly not a dc3500: map[greifswald:{ID:{Type:mac Value:bc:ae:c5:47:5b:4b} Descr:NixOS 22.05 (Quokka) Linux 5.15.72 #1-NixOS SMP Wed Oct 5 08:39:44 UTC 2022 x86_64 MgmtIP:[192.168.1.5 fd52:e54d:2bb4::94c] Capability:[{Type:Bridge Enabled:false} {Type:Router Enabled:false} {Type:Wlan Enabled:true} {Type:Station Enabled:false}]}]
+2023/01/11 21:39:56 topologyd.go:216: Processing #1 (host 192.168.1.5), todo list: []
+2023/01/11 21:39:56 topologyd.go:44: Received HTTP GET from 192.168.1.5:42080 for /lldp/neighbors
+2023/01/11 21:39:56 topologyd.go:157: cannot unmarshal json object of unknown format: {}
+2023/01/11 21:39:56 topologyd.go:238: GET neighbors from '192.168.1.5': error: cannot unmarshal json object of unknown format: {}. Skipping.
+2023/01/11 21:39:56 topologyd.go:216: == End gathering neighbors ==
+#+end_example
+
+

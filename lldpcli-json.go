@@ -83,14 +83,21 @@ type NeighborInterface struct {
 	Port    NeighborPort    `json:"port,omitempty"`
 }
 
-type NeighborInfo struct {
+type LldpcliNeighborInfo struct {
+	// "lldp" here is the protocol name over which the information is received.
+	// Since we don't currently support any other discovery protocols
+	// implemented by lldpd, it is hardcoded here.
 	Lldp struct {
-		// This part of lldpcli -f json output is weird and doesn't work well
-		// with go's json library, hence the strange type.  It gets fixed
-		// further down in lldp_parse_neighbor_data().
-		Interface []map[string]*NeighborInterface `json:"interface,omitempty"`
+		// This part of lldpcli -f json output is really weird: it produces an
+		// array if multiple neighbors are found and only the object if there's
+		// only one. It also makes fairly unnecessary use of encapsulated
+		// objects. It gets fixed further down, immediately upon handling the
+		// incoming JSON document.
+		Interface json.RawMessage `json:"interface"`
 	} `json:"lldp,omitempty"`
 }
+
+type LldpcliNeighborInterfaceMap map[string]*NeighborInterface
 
 // Contains the same information as NeighborInfo but sensibly flattened
 type NeighborSource struct {
@@ -170,22 +177,43 @@ func lldp_parse_chassis_data(b []byte) (*ChassisInfo, error) {
 
 // parses "lldpcli -f json show neighbors" output
 func lldp_parse_neighbor_data(b []byte) ([]NeighborSource, error) {
-	var n NeighborInfo
-
-	if err := json.Unmarshal(b, &n); err != nil {
+	// First pass: Unmarshal { "lldp": ...data }
+	var ln LldpcliNeighborInfo
+	if err := json.Unmarshal(b, &ln); err != nil {
 		return nil, err
 	}
-	dbg_json(n)
 
-	ifaces := make([]NeighborSource, len(n.Lldp.Interface))
+	// Second pass: Attempt to Unmarshal single Object returned for "interface"
+	// in { "lldp": { "interface" : { "eth0" : <NeighborInterface> } } }
+	var lm       LldpcliNeighborInterfaceMap
+	var inputs []LldpcliNeighborInterfaceMap
 
-	/* loop over array of objects which have 1 element each such as
-	   [{"eth0": <NeighborInterface>}, {"eth1": <NeighborInterface>}] */
-	for i, ifmap := range n.Lldp.Interface {
+	if err := json.Unmarshal(ln.Lldp.Interface, &lm); err == nil {
+		inputs = []LldpcliNeighborInterfaceMap{ lm }
+
+	// If this didn't work: attempt to unmarshal the same thing as an array of such
+	// objects rather than a single object. lldpcli confusingly returns an array
+	// only if there is more than one object:
+	// { "lldp": { "interface": [
+	//   { "eth0" : <NeighborInterface> },
+	//   { "eth1" : <NeighborInterface> } ] } }
+	} else if err := json.Unmarshal(ln.Lldp.Interface, &inputs); err != nil {
+		return nil, fmt.Errorf("cannot unmarshal json object of unknown format: %s", ln.Lldp)
+	}
+
+	// Since the JSON format is crazy, reshape the returned data to be easier to
+	// work with
+	ifaces := make([]NeighborSource, len(inputs))
+
+	/* loop over array of interface objects which have 1 element each such as
+	   [{"eth0": <NeighborInterface>}, {"eth1": <NeighborInterface>}]
+	   this is bad enough in JSON, but in Go each of these objects is
+	   Unmarshaled into a map of length 1 */
+	for i, ifmap := range inputs {
 		if len(ifmap) > 1 {
 			// XXX In this case, only the last one survives and the rest gets
 			// clobbered. Should this ever happen, investigate why.
-			log.Printf("Too many interfaces in JSON object, is this really lldpcli output?")
+			log.Printf("Too many interfaces in JSON object - possible bug, is this really lldpcli output?")
 		}
 
 		/* k = interface name, v = struct NeighborInterface */
@@ -196,6 +224,7 @@ func lldp_parse_neighbor_data(b []byte) ([]NeighborSource, error) {
 				v.Chassis[kk] = vv
 			}
 
+			// append to return value array
 			ifaces[i] = NeighborSource{k, *v}
 		}
 	}
