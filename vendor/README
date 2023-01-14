@@ -1,0 +1,9 @@
+This is not quite right. JGF should have its own repository or at the very
+least a final path in a git repository on the internet according to how the Go
+developers think the world should work.
+
+However it is only a separate package because I want some quick and easy
+namespacing. As a quick workaround, I decided to abuse the vendor directory for
+my nefarious purposes.
+
+https://go.dev/ref/mod#vendoring
