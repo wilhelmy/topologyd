@@ -79,7 +79,8 @@ func assemble_graph(start string, neighbors *NodeMap) *NeighborGraphs {
     for k, v := range *neighbors {
         if v == nil {
             log.Printf("Error: neighbor '%s' has nil neighbors instead "+
-                "of empty list. This is a bug.", k)
+                "of empty list. This can mean topologyd isn't running there or "+
+                "it is a bug.", k)
             continue
         }
         graphs[k] = assemble_node(k, v, graphs)

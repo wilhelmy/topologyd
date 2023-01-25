@@ -24,7 +24,8 @@ func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
 	for node_addr, lldp_info := range *nodes {
         if lldp_info == nil {
             log.Printf("Error: neighbor '%s' has nil neighbors instead "+
-                "of empty list. This is a bug.", node_addr)
+                "of empty list. This can mean topologyd isn't running there or "+
+				"it is a bug.", node_addr)
             continue
 		}
 

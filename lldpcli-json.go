@@ -58,9 +58,10 @@ type ChassisMember struct {
 
 type ChassisMap map[string]ChassisMember
 
-type ChassisInfo struct {
+type LldpcliChassisInfo struct {
 	LocalChassis struct {
-		Chassis ChassisMap `json:"chassis,omitempty"`
+		// see comment for LldpcliNeighborInfo.Lldp
+		Chassis json.RawMessage `json:"chassis,omitempty"`
 	} `json:"local-chassis,omitempty"`
 }
 
@@ -160,19 +161,34 @@ func dbg_json(obj interface{}) {
 }
 
 // parses "lldpcli -f json show chassis" output
-func lldp_parse_chassis_data(b []byte) (*ChassisInfo, error) {
-	var c ChassisInfo
-	if err := json.Unmarshal(b, &c); err != nil {
+func lldp_parse_chassis_data(b []byte) (ret ChassisMap, err error) {
+	// Step 1: unmarshal into temporary struct
+	var c1 LldpcliChassisInfo
+	if err = json.Unmarshal(b, &c1); err != nil {
 		return nil, err
 	}
 
-	for k, v := range c.LocalChassis.Chassis {
-		fix_mgmt_ip(&v)
-		c.LocalChassis.Chassis[k] = v
+	// Step 2: try to unmarshal into ChassisMap
+	if err = json.Unmarshal(c1.LocalChassis.Chassis, &ret); err != nil {
+		// that didn't work, create new ChassisMap with single element keyed by
+		// empty string... lldpcli output being crazy again
+		log.Println("lldpcli chassis information has weird format - is lldpd running?")
+		var c ChassisMember
+		if err = json.Unmarshal(c1.LocalChassis.Chassis, &c); err != nil {
+			return nil, err
+		}
+		// clear leftovers from previous Unmarshal attempt
+		for k, _ := range ret {delete(ret, k)}
+		ret[""] = c
 	}
 
-	dbg_json(c)
-	return &c, nil
+	// Step 3: fix all managment IPs found in any chassis
+	for k, v := range ret {
+		fix_mgmt_ip(&v)
+		ret[k] = v
+	}
+
+	return ret, nil
 }
 
 // parses "lldpcli -f json show neighbors" output

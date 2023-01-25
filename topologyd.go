@@ -233,13 +233,13 @@ func http_get_host_mgmt_ip(host string) string {
     data := http_get(host, lldp_chassis_path)
     if data == nil { return "" }
 
-    chassisptr, err := lldp_parse_chassis_data(data)
+    chassismap, err := lldp_parse_chassis_data(data)
     if err != nil {
         log.Println(err)
         return ""
     }
 
-    chassis, err := get_chassis((*chassisptr).LocalChassis.Chassis)
+    chassis, err := get_chassis(chassismap)
     if err != nil {
         log.Printf("machine %s: error %s", host, err)
     }
@@ -332,7 +332,8 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     for k, v := range *nodes {
         if v == nil {
             log.Printf("Error: neighbor '%s' has nil neighbors instead "+
-                "of empty list. This is a bug.", k)
+                "of empty list. This can mean topologyd isn't running there or "+
+                "it is a bug.", k)
             continue
         }
 
