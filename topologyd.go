@@ -36,6 +36,7 @@ const dbg_gather_neighbors_verbose = true
 /**** Constants ***********************************************************************/
 const lldp_neighbor_path = "/lldp/neighbors"
 const lldp_chassis_path  = "/lldp/chassis"
+const stp_port_state_path= "/stp/port_state"
 const graphviz_path      = "/topology/graphviz"
 const jgf_path           = "/topology/jgf"
 
@@ -112,8 +113,28 @@ func handle_jgf_request(w http.ResponseWriter, req *http.Request) {
     }
 }
 
+// Handler function for incoming HTTP queries to the STP API
+func handle_stp_request(w http.ResponseWriter, req *http.Request) {
+    res := STP_get_port_state_json(netif_link_local_ipv6)
+
+    if len(res) == 0 {
+        log.Printf("Request for '%s': Internal Server Error, "+
+            "see previous error message for reason.", req.URL.Path)
+        w.WriteHeader(http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    if _, err := w.Write(res); err != nil {
+        log.Printf("Request for '%s' caused failure %s\n", req.URL.Path, err)
+    }
+
+    return
+}
+
 // Send HTTP GET requests to specified node, logs errors and discards malformed
-// responses to keep the rest of the logic clean
+// responses to keep the rest of the logic clean - expects JSON response from
+// Server
 func http_get(host string, path string) []byte {
     if host == "" {
         log.Printf("http_get called with empty host")
@@ -345,11 +366,13 @@ func main() {
     }
 
     // initialize http handlers
-    http.HandleFunc(lldp_neighbor_path, handle_lldp_request)
-    http.HandleFunc(lldp_chassis_path,  handle_lldp_request)
+    http.HandleFunc(lldp_neighbor_path,  handle_lldp_request)
+    http.HandleFunc(lldp_chassis_path,   handle_lldp_request)
 
-    http.HandleFunc(graphviz_path,      handle_graphviz_request)
-    http.HandleFunc(jgf_path,           handle_jgf_request)
+    http.HandleFunc(stp_port_state_path, handle_stp_request)
+
+    http.HandleFunc(graphviz_path,       handle_graphviz_request)
+    http.HandleFunc(jgf_path,            handle_jgf_request)
 
     // start httpd
     if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
