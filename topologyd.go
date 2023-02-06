@@ -143,12 +143,12 @@ func http_get(host string, path string) []byte {
     }
     var url string
     frag := ""
-    if strings.ToLower(host[:5]) == "fe80:" {
+    if ip := net.ParseIP(host); ip.IsLinkLocalUnicast() {
         // link local IPv6 address, need to append %netif or else it isn't valid
         frag = "%25" + netif_link_local_ipv6 //%25 = %
     }
     if strings.Index(host, ":") >= 0 {
-        // IPv6 address
+        // IPv6 addresses need to be wrapped in angle brackets
         url = fmt.Sprintf("http://[%s%s]:%d%s", host, frag, port, path)
     } else {
         url = fmt.Sprintf("http://%s:%d%s", host, port, path)
