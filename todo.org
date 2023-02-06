@@ -166,7 +166,7 @@ exit status 2
 
 #+end_example
 * TODO Add testsuite
-* HOLD What about the case when no lldp neighbors are found?
+* TODO What about the case when no lldp neighbors are found?
 Is the JSON output still parseable? -> No, but it does not raise an error.
 
 #+begin_example
@@ -204,4 +204,10 @@ $ go run . -netif enp3s0
 2023/01/11 21:39:56 topologyd.go:216: == End gathering neighbors ==
 #+end_example
 
-
+* TODO Sort graphviz output
+Otherwise it jumps around depending on which nodes are listed first
+* TODO MgmtIP sometimes empty when a new host appears? workaround required
+#+begin_example
+Jan 30 12:21:47 dc3500 topologyd[480]: 2023/01/30 12:21:47 lldpcli-json.go:148: MgmtIP[]: No IP address found for chassis {ID:{Type:mac Value:b6:fe:ef:00:00:22} Descr:DET Wayland dunfell-7.0 -27-g4846420 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64 MgmtIP:[] Capability:[{Type:Bridge Enabled:true} {Type:Router Enabled:false} {Type:Wlan Enabled:false} {Type:Station Enabled:false}]} (all empty?)
+Jan 30 12:21:49 dc3500 topologyd[480]: 2023/01/30 12:21:49 topologyd.go:261: == Begin gathering neighbors ==
+#+end_example

@@ -102,8 +102,9 @@ type LldpcliNeighborInterfaceMap map[string]*NeighborInterface
 
 // Contains the same information as NeighborInfo but sensibly flattened
 type NeighborSource struct {
-	Name  string
-	Iface NeighborInterface
+	Name      string
+	Iface     NeighborInterface
+	LinkState PortState // STP Link state
 }
 
 /**** JSON Parsing and handling of format weirdnesses *********************************/
@@ -241,15 +242,46 @@ func lldp_parse_neighbor_data(b []byte) ([]NeighborSource, error) {
 			}
 
 			// append to return value array
-			ifaces[i] = NeighborSource{k, *v}
+			ifaces[i] = NeighborSource{ Name: k, Iface: *v }
 		}
 	}
 
 	return ifaces, nil
 }
 
-func get_neighbor_mgmt_ips(src *[]NeighborSource) *[]string {
-	res := make([]string, len(*src))
+// Extracts a hopefully suitable chassis from a chassis map
+func get_chassis_hostname(c ChassisMap) (memb ChassisMember, host string, err error) {
+    if len(c) > 1 {
+        return ChassisMember{}, "",
+            fmt.Errorf("This strange machine reports more than 1 chassis: %+v", c)
+    }
+    // fallback: machine doesn't self-identify as known_relevant_chassis_name
+    // or hostname changed; return the first chassis found and log a warning
+    for k, v := range c {
+        // XXX move this to an outer loop to avoid spamming the log
+        //log.Printf("Found machine '%s' which is seemingly not a %s: %+v", k,
+        //    known_relevant_chassis_name, c)
+        memb = v
+		host = k
+        return
+    }
+    return ChassisMember{}, "",
+        fmt.Errorf("This strange machine reports less than 1 chassis: %+v", c)
+}
+
+// wrapper that throws out the hostname
+func get_chassis(c ChassisMap) (m ChassisMember, e error) {
+	m, _, e = get_chassis_hostname(c)
+	return
+}
+
+type MgmtIPLinkState struct {
+	MgmtIP    string
+	LinkState PortState
+}
+
+func get_neighbor_mgmt_ips_link_state(src *[]NeighborSource) (res []MgmtIPLinkState) {
+	res = make([]MgmtIPLinkState, len(*src))
 
 	for i, v := range *src {
 		chassis, err := get_chassis(v.Iface.Chassis)
@@ -257,8 +289,28 @@ func get_neighbor_mgmt_ips(src *[]NeighborSource) *[]string {
 			log.Printf("Error: %s", err)
 			continue
 		}
-		res[i] = get_mgmt_ip(&chassis)
+		state := v.LinkState
+		if err != nil {
+			log.Print(err)
+			state = Unknown
+		}
+		res[i] = MgmtIPLinkState { MgmtIP: get_mgmt_ip(&chassis), LinkState: state }
 	}
 
-	return &res
+	return
+}
+
+func get_neighbor_hostnames(src *[]NeighborSource) (res map[string]string) {
+	res = make(map[string]string, len(*src))
+
+	for _, v := range *src {
+		chassis, host, err := get_chassis_hostname(v.Iface.Chassis)
+		if err != nil {
+			log.Printf("Error: %s", err)
+			continue
+		}
+		ip := get_mgmt_ip(&chassis)
+		res[ip] = host
+	}
+	return
 }

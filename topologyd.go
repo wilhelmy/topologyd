@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+    "time"
 	"jgf"
 )
 
@@ -152,7 +153,10 @@ func http_get(host string, path string) []byte {
     } else {
         url = fmt.Sprintf("http://%s:%d%s", host, port, path)
     }
-    resp, err := http.Get(url) // send request
+    client := http.Client{
+        Timeout: 2 * time.Second,
+    }
+    resp, err := client.Get(url) // send request
     if err != nil {
         log.Printf("Error querying %s: %s\n", url, err)
         return nil
@@ -186,9 +190,9 @@ func http_get(host string, path string) []byte {
 
 /**** LLDP-HTTP interface *************************************************************/
 // the more wrappers, the better, right?
-func get_node_neighbor_info(host string) ([]NeighborSource, error) {
+func http_get_node_neighbor_info(host string) ([]NeighborSource, error) {
     if host == "" {
-        return nil, fmt.Errorf("get_node_neighbor_info called on empty string")
+        return nil, fmt.Errorf("http_get_node_neighbor_info called on empty string")
     }
 
     data := http_get(host, lldp_neighbor_path)
@@ -203,28 +207,6 @@ func get_node_neighbor_info(host string) ([]NeighborSource, error) {
     }
 
     return ifaces, err
-}
-
-// Extracts a hopefully suitable chassis from a chassis map
-func get_chassis(c ChassisMap) (ChassisMember, error) {
-    if len(c) > 1 {
-        return ChassisMember{},
-            fmt.Errorf("This strange machine reports more than 1 chassis: %+v", c)
-    }
-    // centralize all this hardcoded ugliness in one spot
-    if val, ok := c[known_relevant_chassis_name]; ok {
-        return val, nil
-    }
-    // fallback: machine doesn't self-identify as known_relevant_chassis_name
-    // or hostname changed; return the first chassis found and log a warning
-    for k, v := range c {
-        // XXX move this to an outer loop to avoid spamming the log
-        log.Printf("Found machine '%s' which is seemingly not a %s: %+v", k,
-            known_relevant_chassis_name, c)
-        return v, nil
-    }
-    return ChassisMember{},
-        fmt.Errorf("This strange machine reports less than 1 chassis: %+v", c)
 }
 
 // HTTP GET on the chassis URL for a given host, pull MgmtIP out of the chassis
@@ -247,6 +229,15 @@ func http_get_host_mgmt_ip(host string) string {
     return get_mgmt_ip(&chassis)
 }
 
+// Queries STP link state from host
+func http_get_node_stp_link_state(host string) (ret PortToStateMap) {
+    data := http_get(host, stp_port_state_path)
+    if data == nil { return nil }
+
+    ret = STP_parse_port_state_json(data)
+    return
+}
+
 // return text surrounded by terminal attribute for enable/disable bold font
 func bold(x string) string {
     return "\033[1;1m" + x + "\033[0;0m"
@@ -262,7 +253,9 @@ func dbg_gather(format string, arg... interface{}) {
     }
 }
 
-// Crawl the entire network for LLDP neighbors, returning a  slice of nodes
+// Crawl the entire network for LLDP neighbors and STP state, returning a Map of
+// node name (== management IP) to NeighborSource, which in turn contains
+// interface name, STP state and neighbors found on the interface.
 func gather_neighbors_from_nodes() (string, *NodeMap) {
     // hashmap keyed by MgmtIP addresses, also used for tracking whether or not
     // a node has been queried before by setting its value to nil
@@ -278,13 +271,28 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
         ip, todo = todo[0], todo[1:]
         iter++
         dbg_gather(bold("Processing #%d (host %s), todo list: %v"), iter, ip, todo)
-        cur, err := get_node_neighbor_info(ip)
+        // Send HTTP GET requests to obtain neighbors from hosts and process the results
+        cur, err := http_get_node_neighbor_info(ip)
         if err != nil {
             log.Printf("GET neighbors from '%s': error: %s. Skipping.", ip, err)
             continue
         } else if cur == nil {
             log.Printf("GET neighbors from '%s': something is fishy, no object or error returned. Skipping.", ip)
             continue
+        }
+        // Send HTTP GET requests to obtain STP state from hosts and process the results
+        stp := http_get_node_stp_link_state(ip)
+        if stp == nil {
+            log.Printf("GET STP state from '%s': No result,", ip)
+        }
+        for i := range cur {
+            cur[i].LinkState = Unknown
+            var found bool
+            cur[i].LinkState, found = stp[cur[i].Name]
+            if !found {
+                log.Printf("LLDP information includes interface '%s' for which no STP information exists. Setting "+
+                    "to unknown.", cur[i].Name)
+            }
         }
         neighbors[ip] = &cur
 
@@ -302,8 +310,10 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
                 continue
             }
 
+            // the hashtable is dual-use to prevent duplicating previously
+            // looked-up todo list entries
             if _, found := neighbors[newip]; !found {
-                // initialize hashtable spot to prevent adding to todo twice
+                // initialize hashtable location to nil for deduplication
                 neighbors[newip] = nil
                 todo = append(todo, newip)
             }
@@ -314,11 +324,13 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
     return start, &neighbors
 }
 
-func graphviz_quote_array_of_strings(strings *[]string) []byte {
+func graphviz_quote_array_of_mgmt_ip_link_states(in []MgmtIPLinkState) []byte {
     var buf bytes.Buffer
 
-    for _, v := range *strings {
-        buf.WriteString(fmt.Sprintf(" \"%s\"", v))
+    for _, v := range in {
+        if v.MgmtIP != "" {
+            buf.WriteString(fmt.Sprintf(" \"%s\"", v.MgmtIP))
+        }
     }
 
     return buf.Bytes()
@@ -329,6 +341,15 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
 
     buf.WriteString("strict graph {\n")
 
+    hostnames := make(map[string]string, len(*nodes))
+    for _, v := range *nodes {
+        if v == nil {continue} // XXX FIXME lol
+        hostnames_k := get_neighbor_hostnames(v)
+        for k, v := range hostnames_k {
+            hostnames[k] = v
+        }
+    }
+
     for k, v := range *nodes {
         if v == nil {
             log.Printf("Error: neighbor '%s' has nil neighbors instead "+
@@ -337,12 +358,23 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
             continue
         }
 
-        buf.WriteString(fmt.Sprintf("\t\"%s\" [shape=box];\n", k))
+        buf.WriteString(fmt.Sprintf("\t\"%s\" [shape=box,label=\"Machine: %s\\n%s\"]; // node\n", k, hostnames[k], k))
     }
+    buf.WriteString("\n")
+
     for k, v := range *nodes {
         if v == nil {continue} // error already logged above
-        neigh := graphviz_quote_array_of_strings(get_neighbor_mgmt_ips(v))
-        buf.WriteString(fmt.Sprintf("\t\"%s\" -- { %s };\n", k, neigh))
+        mgmtlink := get_neighbor_mgmt_ips_link_state(v)
+        neigh := graphviz_quote_array_of_mgmt_ip_link_states(mgmtlink)
+
+        buf.WriteString(fmt.Sprintf("\t\"%s\" -- {%s }; // edge\n", k, neigh))
+
+        for _, port := range mgmtlink {
+            if port.LinkState != Forwarding {
+                color := [...]string{ "brown", "lightgray", "darkgreen", "black" }[port.LinkState]
+                buf.WriteString(fmt.Sprintf("\t\"%s\" -- \"%s\" [color=%s]; // edge\n", k, port.MgmtIP, color))
+            }
+        }
     }
     buf.WriteString("}\n")
 
