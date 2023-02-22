@@ -41,47 +41,47 @@ func run_lldpcli_show(arg string) ([]byte, error) {
 // https://mholt.github.io/json-to-go/ and then manually pieced apart
 // into substructures.
 
-type ChassisMember struct {
+type LldpcliChassisMember struct {
 	ID struct {
-		Type  string `json:"type,omitempty"`
-		Value string `json:"value,omitempty"`
-	} `json:"id,omitempty"`
-	Descr      string   `json:"descr,omitempty"`
+		Type  string             `json:"type,omitempty"`
+		Value string             `json:"value,omitempty"`
+	}                            `json:"id,omitempty"`
+	Descr      string            `json:"descr,omitempty"`
 	// this is sometimes an array, sometimes a string... declare as interface{}
 	// and fix further down
-	MgmtIP     interface{} `json:"mgmt-ip,omitempty"`
+	MgmtIP     interface{}       `json:"mgmt-ip,omitempty"`
 	Capability []struct {
-		Type    string `json:"type,omitempty"`
-		Enabled bool   `json:"enabled,omitempty"`
-	} `json:"capability,omitempty"`
+		Type    string           `json:"type,omitempty"`
+		Enabled bool             `json:"enabled,omitempty"`
+	}                            `json:"capability,omitempty"`
 }
 
-type ChassisMap map[string]ChassisMember
+type LldpcliChassisMap map[string]LldpcliChassisMember
 
 type LldpcliChassisInfo struct {
 	LocalChassis struct {
 		// see comment for LldpcliNeighborInfo.Lldp
-		Chassis json.RawMessage `json:"chassis,omitempty"`
-	} `json:"local-chassis,omitempty"`
+		Chassis json.RawMessage  `json:"chassis,omitempty"`
+	}                            `json:"local-chassis,omitempty"`
 }
 
-type NeighborPortID struct {
-	Type  string `json:"type,omitempty"`
-	Value string `json:"value,omitempty"`
+type LldpcliNeighborPortID struct {
+	Type  string                 `json:"type,omitempty"`
+	Value string                 `json:"value,omitempty"`
 }
 
-type NeighborPort struct {
-	ID    NeighborPortID `json:"id,omitempty"`
-	Descr string         `json:"descr,omitempty"`
-	TTL   string         `json:"ttl,omitempty"`
+type LldpcliNeighborPort struct {
+	ID    LldpcliNeighborPortID  `json:"id,omitempty"`
+	Descr string                 `json:"descr,omitempty"`
+	TTL   string                 `json:"ttl,omitempty"`
 }
 
-type NeighborInterface struct {
-	Via     string          `json:"via,omitempty"`
-	Rid     string          `json:"rid,omitempty"`
-	Age     string          `json:"age,omitempty"`
-	Chassis ChassisMap      `json:"chassis,omitempty"`
-	Port    NeighborPort    `json:"port,omitempty"`
+type LldpcliNeighborInterface struct {
+	Via     string               `json:"via,omitempty"`
+	Rid     string               `json:"rid,omitempty"`
+	Age     string               `json:"age,omitempty"`
+	Chassis LldpcliChassisMap    `json:"chassis,omitempty"`
+	Port    LldpcliNeighborPort  `json:"port,omitempty"`
 }
 
 type LldpcliNeighborInfo struct {
@@ -95,15 +95,15 @@ type LldpcliNeighborInfo struct {
 		// objects. It gets fixed further down, immediately upon handling the
 		// incoming JSON document.
 		Interface json.RawMessage `json:"interface"`
-	} `json:"lldp,omitempty"`
+	}                             `json:"lldp,omitempty"`
 }
 
-type LldpcliNeighborInterfaceMap map[string]*NeighborInterface
+type LldpcliNeighborInterfaceMap map[string]*LldpcliNeighborInterface
 
 // Contains the same information as NeighborInfo but sensibly flattened
 type NeighborSource struct {
 	Name      string
-	Iface     NeighborInterface
+	Iface     LldpcliNeighborInterface
 	LinkState PortState // STP Link state
 }
 
@@ -111,7 +111,7 @@ type NeighborSource struct {
 // Because the MgmtIP field can be either an array of IP addresses in case of
 // multiple reported addresses, or a string in case there is only one, it needs
 // special treatment. Here it gets turned into a []string.
-func fix_mgmt_ip(chassis *ChassisMember) {
+func fix_mgmt_ip(chassis *LldpcliChassisMember) {
 	switch vv := (*chassis).MgmtIP.(type) {
 	case string: // transform into slice
 		(*chassis).MgmtIP = []string{ vv }
@@ -138,7 +138,7 @@ func fix_mgmt_ip(chassis *ChassisMember) {
 	}
 }
 
-func get_mgmt_ip(chassis *ChassisMember) string {
+func get_mgmt_ip(chassis *LldpcliChassisMember) string {
 	// Since this function runs after fix_mgmt_ip, the MgmtIP member should always
 	// be of type []string now.
 	ips, ok := (*chassis).MgmtIP.([]string)
@@ -162,19 +162,19 @@ func dbg_json(obj interface{}) {
 }
 
 // parses "lldpcli -f json show chassis" output
-func lldp_parse_chassis_data(b []byte) (ret ChassisMap, err error) {
+func lldp_parse_chassis_data(b []byte) (ret LldpcliChassisMap, err error) {
 	// Step 1: unmarshal into temporary struct
 	var c1 LldpcliChassisInfo
 	if err = json.Unmarshal(b, &c1); err != nil {
 		return nil, err
 	}
 
-	// Step 2: try to unmarshal into ChassisMap
+	// Step 2: try to unmarshal into LldpcliChassisMap
 	if err = json.Unmarshal(c1.LocalChassis.Chassis, &ret); err != nil {
-		// that didn't work, create new ChassisMap with single element keyed by
+		// that didn't work, create new LldpcliChassisMap with single element keyed by
 		// empty string... lldpcli output being crazy again
 		log.Println("lldpcli chassis information has weird format - is lldpd running?")
-		var c ChassisMember
+		var c LldpcliChassisMember
 		if err = json.Unmarshal(c1.LocalChassis.Chassis, &c); err != nil {
 			return nil, err
 		}
@@ -250,9 +250,9 @@ func lldp_parse_neighbor_data(b []byte) ([]NeighborSource, error) {
 }
 
 // Extracts a hopefully suitable chassis from a chassis map
-func get_chassis_hostname(c ChassisMap) (memb ChassisMember, host string, err error) {
+func get_chassis_hostname(c LldpcliChassisMap) (memb LldpcliChassisMember, host string, err error) {
     if len(c) > 1 {
-        return ChassisMember{}, "",
+        return LldpcliChassisMember{}, "",
             fmt.Errorf("This strange machine reports more than 1 chassis: %+v", c)
     }
     // fallback: machine doesn't self-identify as known_relevant_chassis_name
@@ -265,12 +265,12 @@ func get_chassis_hostname(c ChassisMap) (memb ChassisMember, host string, err er
 		host = k
         return
     }
-    return ChassisMember{}, "",
+    return LldpcliChassisMember{}, "",
         fmt.Errorf("This strange machine reports less than 1 chassis: %+v", c)
 }
 
 // wrapper that throws out the hostname
-func get_chassis(c ChassisMap) (m ChassisMember, e error) {
+func get_chassis(c LldpcliChassisMap) (m LldpcliChassisMember, e error) {
 	m, _, e = get_chassis_hostname(c)
 	return
 }
