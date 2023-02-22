@@ -59,7 +59,6 @@ func handle_lldp_request(w http.ResponseWriter, req *http.Request) {
         return
     }
 
-    // TODO cache result for a few seconds?
     res, err := run_lldpcli_show(reqName)
     if err != nil {
         w.WriteHeader(http.StatusInternalServerError)
