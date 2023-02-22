@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+    "net"
 	"net/http"
 	"strings"
     "time"
@@ -142,14 +143,14 @@ func http_get(host string, path string) []byte {
         return []byte{}
     }
     var url string
-    frag := ""
+    zone := ""
     if ip := net.ParseIP(host); ip.IsLinkLocalUnicast() {
-        // link local IPv6 address, need to append %netif or else it isn't valid
-        frag = "%25" + netif_link_local_ipv6 //%25 = %
+        // link local IPv6 address, need to append %netif, otherwise it can't be used
+        zone = "%25" + netif_link_local_ipv6 //%25 = %
     }
     if strings.Index(host, ":") >= 0 {
         // IPv6 addresses need to be wrapped in angle brackets
-        url = fmt.Sprintf("http://[%s%s]:%d%s", host, frag, port, path)
+        url = fmt.Sprintf("http://[%s%s]:%d%s", host, zone, port, path)
     } else {
         url = fmt.Sprintf("http://%s:%d%s", host, port, path)
     }
@@ -385,6 +386,7 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
 func main() {
     // add file name + line number to log output
     log.SetFlags(log.LstdFlags | log.Lshortfile)
+
 
     // handle command line flags
     flag.IntVar(    &port,           "port",                     9090, "listen port")
