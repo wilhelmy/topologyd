@@ -30,6 +30,8 @@ var known_relevant_chassis_name string
 // Preallocate this many entries in the hashtable. Can be tuned in the future if networks are larger in practice.
 var nodes_prealloc int
 
+// HTTP request timeout
+var http_timeout time.Duration
 
 /**** Debug section *******************************************************************/
 const dbg_http_query_verbose = false
@@ -155,7 +157,7 @@ func http_get(host string, path string) []byte {
         url = fmt.Sprintf("http://%s:%d%s", host, port, path)
     }
     client := http.Client{
-        Timeout: 2 * time.Second,
+        Timeout: http_timeout,
     }
     resp, err := client.Get(url) // send request
     if err != nil {
@@ -389,11 +391,12 @@ func main() {
 
 
     // handle command line flags
-    flag.IntVar(    &port,           "port",                     9090, "listen port")
-    flag.IntVar(    &nodes_prealloc, "nodes-prealloc",             32, "expected maximum number of nodes in network for memory allocation")
-    flag.StringVar( &start_host,     "start-host",        "localhost", "start host for topology discovery")
-    flag.StringVar( &netif_link_local_ipv6, "netif",            "br0", "network interface to use for IPv6 LL traffic")
-    flag.StringVar( &known_relevant_chassis_name, "chassis", "dc3500", "hostnames other than this generate a warning if found")
+    flag.IntVar(      &port,           "port",                     9090, "listen port")
+    flag.IntVar(      &nodes_prealloc, "nodes-prealloc",             32, "expected maximum number of nodes in network for memory allocation")
+    flag.DurationVar( &http_timeout,   "http-timeout",    2*time.Second, "HTTP request timeout")
+    flag.StringVar(   &start_host,     "start-host",        "localhost", "start host for topology discovery")
+    flag.StringVar(   &netif_link_local_ipv6, "netif",            "br0", "network interface to use for IPv6 LL traffic")
+    flag.StringVar(   &known_relevant_chassis_name, "chassis", "dc3500", "hostnames other than this generate a warning if found")
     flag.Parse()
 
     if len(flag.Args()) > 0 {
