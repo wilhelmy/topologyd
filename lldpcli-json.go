@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"net"
+	"sort"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -56,6 +58,8 @@ type LldpcliChassisMember struct {
 	}                            `json:"capability,omitempty"`
 }
 
+// lldpcli JSON for any chassis consists of an object keyed by the system
+// hostname with the machine chassis as only element in the object
 type LldpcliChassisMap map[string]LldpcliChassisMember
 
 type LldpcliChassisInfo struct {
@@ -98,20 +102,14 @@ type LldpcliNeighborInfo struct {
 	}                             `json:"lldp,omitempty"`
 }
 
+// Map for interface name -> neighbours found on that interface
 type LldpcliNeighborInterfaceMap map[string]*LldpcliNeighborInterface
-
-// Contains the same information as NeighborInfo but sensibly flattened
-type NeighborSource struct {
-	Name      string
-	Iface     LldpcliNeighborInterface
-	LinkState PortState // STP Link state
-}
 
 /**** JSON Parsing and handling of format weirdnesses *********************************/
 // Because the MgmtIP field can be either an array of IP addresses in case of
 // multiple reported addresses, or a string in case there is only one, it needs
 // special treatment. Here it gets turned into a []string.
-func fix_mgmt_ip(chassis *LldpcliChassisMember) {
+func (chassis *LldpcliChassisMember) fix_mgmt_ip() {
 	switch vv := (*chassis).MgmtIP.(type) {
 	case string: // transform into slice
 		(*chassis).MgmtIP = []string{ vv }
@@ -136,21 +134,44 @@ func fix_mgmt_ip(chassis *LldpcliChassisMember) {
 		log.Printf("Error: this code should be unreachable. Got %T instead of string-ish type", vv)
 		(*chassis).MgmtIP = []string{}
 	}
+
+	// Sort IP addresses in ascending order to get more predictable results
+	ips := (*chassis).MgmtIP.([]string)
+	sort.Strings(ips)
+	(*chassis).MgmtIP = ips
 }
 
-func get_mgmt_ip(chassis *LldpcliChassisMember) string {
-	// Since this function runs after fix_mgmt_ip, the MgmtIP member should always
-	// be of type []string now.
-	ips, ok := (*chassis).MgmtIP.([]string)
-	if !ok {
-		log.Printf("MgmtIP[]: Expected []string, got %T (%s)", (*chassis).MgmtIP, (*chassis).MgmtIP)
-		return ""
-	} else if len(ips) < 1 {
-		log.Printf("MgmtIP[]: No IP address found for chassis %+v (all empty?)", *chassis)
-		return ""
+// Returns the type of Chassis ID. Currently only MAC_ID is supported, everything
+// else returns UNKNOWN_ID
+func (chassis *LldpcliChassisMember) get_idtype() (idtype IdentifierType) {
+	idtype, ok := _IdMap[chassis.ID.Type]
+	if !ok {idtype = UNKNOWN_ID}
+	return
+}
+
+// Picks the most suitable Management IP from a list according to policy set by
+// command line parameters
+func get_suitable_mgmt_ip(MgmtIPs []string) (string, error) {
+	if len(MgmtIPs) < 1 {
+		return "", fmt.Errorf("No IP address found for Neighbor (is it defined?)")
 	}
 
-	return ips[0]
+	// For machines that have Link Local/IPv6 MgmtIPs available, prefer those
+	// over any other type of address returned by lldpd, depending on argv
+	if ARGV.prefer_link_local || ARGV.prefer_ipv6 {
+		for _, v := range MgmtIPs {
+			ip := net.ParseIP(v)
+			if ARGV.prefer_link_local && ip.IsLinkLocalUnicast() {
+				return v, nil
+			} else if ip.To4() == nil {
+				return v, nil
+			}
+		}
+	}
+
+	// No link local address was found (or link local addresses aren't
+	// preferred), return the first address
+	return MgmtIPs[0], nil
 }
 
 // conditionally log message to see if data parses correctly into the struct
@@ -162,38 +183,111 @@ func dbg_json(obj interface{}) {
 }
 
 // parses "lldpcli -f json show chassis" output
-func lldp_parse_chassis_data(b []byte) (ret LldpcliChassisMap, err error) {
+func lldp_parse_chassis_data(b []byte) (ret LocalChassis, err error) {
 	// Step 1: unmarshal into temporary struct
-	var c1 LldpcliChassisInfo
-	if err = json.Unmarshal(b, &c1); err != nil {
-		return nil, err
-	}
+	var ci LldpcliChassisInfo
+	if err = json.Unmarshal(b, &ci); err != nil {return}
 
 	// Step 2: try to unmarshal into LldpcliChassisMap
-	if err = json.Unmarshal(c1.LocalChassis.Chassis, &ret); err != nil {
+	var cm LldpcliChassisMap
+	if err = json.Unmarshal(ci.LocalChassis.Chassis, &cm); err != nil {
 		// that didn't work, create new LldpcliChassisMap with single element keyed by
-		// empty string... lldpcli output being crazy again
+		// empty string... in case lldpcli output is going crazy again
 		log.Println("lldpcli chassis information has weird format - is lldpd running?")
 		var c LldpcliChassisMember
-		if err = json.Unmarshal(c1.LocalChassis.Chassis, &c); err != nil {
-			return nil, err
+		if err = json.Unmarshal(ci.LocalChassis.Chassis, &c); err != nil {return}
+		cm = make(LldpcliChassisMap)
+		cm[""] = c
+	}
+
+	// Step 3: fix all managment IPs found in chassis
+	if len(cm) != 1 {
+		log.Println("lldpcli show chassis returns %d chassises, expected 1", len(cm))
+	}
+	for hostname, chassis := range cm {
+		chassis.fix_mgmt_ip()
+
+		ret = LocalChassis{
+			Identifier:    chassis.ID.Value,
+			IdType:        chassis.get_idtype(),
+			Descr:         chassis.Descr,
+			Hostname:      hostname,
+			MgmtIPs:       chassis.MgmtIP.([]string),
 		}
-		// clear leftovers from previous Unmarshal attempt
-		for k, _ := range ret {delete(ret, k)}
-		ret[""] = c
+		break
 	}
 
-	// Step 3: fix all managment IPs found in any chassis
-	for k, v := range ret {
-		fix_mgmt_ip(&v)
-		ret[k] = v
+	return
+}
+
+type IdentifierType int
+
+const (
+	UNKNOWN_ID IdentifierType = iota
+	MAC_ID
+)
+
+var _IdMap = map[string]IdentifierType{
+	"mac": MAC_ID,
+}
+
+// Contains the same information as LldpcliNeighborInfo but sensibly flattened
+type Neighbor struct {
+	Identifier         string // hopefully unique identifier used by this machine (MAC address)
+	IdType             IdentifierType
+	Descr              string
+	Hostname           string
+	SourceIface        string
+	MgmtIPs          []string
+	//Iface            LldpcliNeighborInterface
+	//LinkState        PortState // STP Link state
+}
+
+// For the local chassis, the data is almost the same, except SourceIface and
+// potentially some other fields are unset.  Create a cheap type alias to make
+// the difference more obvious on the type system level.
+type LocalChassis Neighbor
+
+// Declare a type alias to define methods on it later
+type NeighborSlice []Neighbor
+
+// There should only ever be one element in this map, and not all data is
+// actually used, so it gets flattened to our saner Neighbor type here
+func lldpcli_neighbor_interface_map_to_neighbor(ifmap LldpcliNeighborInterfaceMap) (n Neighbor) {
+	if len(ifmap) != 1 {
+		// In this case, only the first one survives and the rest is
+		// thrown away. Should this ever happen, investigate why.
+		log.Printf("Incorrect number of interfaces in JSON object - possible bug, is this really lldpcli output?")
 	}
 
-	return ret, nil
+	/* k = interface name ("eth0" etc), v = struct NeighborInterface */
+	for sourceIface, neighborIface := range ifmap {
+		var chassis     LldpcliChassisMember
+		var chassisName string
+
+		for chassisName, chassis = range neighborIface.Chassis {
+			/* All MgmtIPs of type interface{} need to be coerced to []string */
+			chassis.fix_mgmt_ip()
+			break
+		}
+
+		n = Neighbor{
+			SourceIface:    sourceIface,
+			Hostname:       chassisName,
+			Identifier:     chassis.ID.Value,
+			IdType:         chassis.get_idtype(),
+			Descr:          chassis.Descr,
+			MgmtIPs:        chassis.MgmtIP.([]string),
+		}
+		fmt.Println(neighborIface.Port)
+		n.ValidateHostname()
+		return
+	}
+	return
 }
 
 // parses "lldpcli -f json show neighbors" output
-func lldp_parse_neighbor_data(b []byte) ([]NeighborSource, error) {
+func Parse_lldpcli_neighbors_output(b []byte) (NeighborSlice, error) {
 	// First pass: Unmarshal { "lldp": ...data }
 	var ln LldpcliNeighborInfo
 	if err := json.Unmarshal(b, &ln); err != nil {
@@ -220,70 +314,32 @@ func lldp_parse_neighbor_data(b []byte) ([]NeighborSource, error) {
 
 	// Since the JSON format is crazy, reshape the returned data to be easier to
 	// work with
-	ifaces := make([]NeighborSource, len(inputs))
+	ifaces := make(NeighborSlice, len(inputs))
 
 	/* loop over array of interface objects which have 1 element each such as
 	   [{"eth0": <NeighborInterface>}, {"eth1": <NeighborInterface>}]
 	   this is bad enough in JSON, but in Go each of these objects is
 	   Unmarshaled into a map of length 1 */
 	for i, ifmap := range inputs {
-		if len(ifmap) > 1 {
-			// XXX In this case, only the last one survives and the rest gets
-			// clobbered. Should this ever happen, investigate why.
-			log.Printf("Too many interfaces in JSON object - possible bug, is this really lldpcli output?")
-		}
-
-		/* k = interface name, v = struct NeighborInterface */
-		for k, v := range ifmap {
-			/* All MgmtIPs of type interface{} need to be coerced to []string */
-			for kk, vv := range v.Chassis {
-				fix_mgmt_ip(&vv)
-				v.Chassis[kk] = vv
-			}
-
-			// append to return value array
-			ifaces[i] = NeighborSource{ Name: k, Iface: *v }
-		}
+		ifaces[i] = lldpcli_neighbor_interface_map_to_neighbor(ifmap)
 	}
 
 	return ifaces, nil
 }
 
-// Extracts a hopefully suitable chassis from a chassis map
-func get_chassis_hostname(c LldpcliChassisMap) (memb LldpcliChassisMember, host string, err error) {
-    if len(c) > 1 {
-        return LldpcliChassisMember{}, "",
-            fmt.Errorf("This strange machine reports more than 1 chassis: %+v", c)
-    }
-    // fallback: machine doesn't self-identify as known_relevant_chassis_name
-    // or hostname changed; return the first chassis found and log a warning
-    for k, v := range c {
-        // XXX move this to an outer loop to avoid spamming the log
-        //log.Printf("Found machine '%s' which is seemingly not a %s: %+v", k,
-        //    known_relevant_chassis_name, c)
-        memb = v
-		host = k
-        return
-    }
-    return LldpcliChassisMember{}, "",
-        fmt.Errorf("This strange machine reports less than 1 chassis: %+v", c)
-}
 
-// wrapper that throws out the hostname
-func get_chassis(c LldpcliChassisMap) (m LldpcliChassisMember, e error) {
-	m, _, e = get_chassis_hostname(c)
-	return
-}
-
+/* TODO merge with other data type
 type MgmtIPLinkState struct {
 	MgmtIP    string
 	LinkState PortState
 }
+*/
 
-func get_neighbor_mgmt_ips_link_state(src *[]NeighborSource) (res []MgmtIPLinkState) {
+/* TODO
+func get_neighbor_mgmt_ips_link_state(src []Neighbor) (res []MgmtIPLinkState) {
 	res = make([]MgmtIPLinkState, len(*src))
 
-	for i, v := range *src {
+	for i, n := range src {
 		chassis, err := get_chassis(v.Iface.Chassis)
 		if err != nil {
 			log.Printf("Error: %s", err)
@@ -299,18 +355,56 @@ func get_neighbor_mgmt_ips_link_state(src *[]NeighborSource) (res []MgmtIPLinkSt
 
 	return
 }
+*/
 
-func get_neighbor_hostnames(src *[]NeighborSource) (res map[string]string) {
-	res = make(map[string]string, len(*src))
+func (n *Neighbor) ValidateHostname() {
+	if !(ARGV.host_prefix <= (*n).Hostname) {
+        log.Printf("Found machine '%s' which is seemingly not a %s: %+v", n.Identifier,
+            ARGV.host_prefix, n)
+	}
+}
 
-	for _, v := range *src {
+// Returns a map from MgmtIP to hostname reported via LLDP
+func (ns *NeighborSlice) get_hostnames() (res map[string]string) {
+	res = make(map[string]string, len(*ns))
+	for _, n := range *ns {
+		mgmt_ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
+		if err != nil {
+			log.Printf("Error getting MgmtIP from host %+v: %s", n, err)
+		}
+		res[mgmt_ip] = n.Hostname
+	}
+	return
+}
+
+func (ns *NeighborSlice) get_mgmt_ips() (res []string) {
+	res = make([]string, len(*ns))
+	for i, n := range *ns {
+		mgmt_ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
+		if err != nil {
+			log.Printf("Error getting MgmtIP from host %+v: %s", n, err)
+		}
+		res[i] = mgmt_ip
+	}
+	return
+}
+
+/* TODO
+// returns a map
+func get_neighbor_hostnames(src []Neighbor) (res map[string]string) {
+	res = make(map[string]string, len(src))
+
+	for _, neigh := range src {
+		neigh.Hostname
 		chassis, host, err := get_chassis_hostname(v.Iface.Chassis)
 		if err != nil {
 			log.Printf("Error: %s", err)
 			continue
 		}
-		ip := get_mgmt_ip(&chassis)
+		ip := get_suitable_mgmt_ip(chassis.MgmtIPs)(&chassis)
 		res[ip] = host
 	}
 	return
 }
+
+*/

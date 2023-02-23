@@ -51,26 +51,32 @@ func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
 
 	for node_addr, lldp_info := range *nodes {
 		if lldp_info == nil { continue } // error already logged above
-		neighbors := get_neighbor_mgmt_ips_link_state(lldp_info)
-		for _, neighbor := range neighbors {
+		//neighbors := get_neighbor_mgmt_ips_link_state(lldp_info)
+		//neighbors := lldp_info.MgmtIPs
+		for _, neighbor := range lldp_info {
+			neighbor_addr, err := get_suitable_mgmt_ip(neighbor.MgmtIPs)
+			if err != nil {
+				log.Printf("Unable to get MgmtIP from %s: %s", neighbor_addr, err)
+				continue
+			}
 			// found duplicate or "reverse duplicate" (i.e. the same link but
 			// reported by the neighbor host)?
-			if dedup[IpTuple{node_addr, neighbor.MgmtIP}] ||
-			   dedup[IpTuple{neighbor.MgmtIP, node_addr}] {
+			if dedup[IpTuple{node_addr, neighbor_addr}] ||
+			   dedup[IpTuple{neighbor_addr, node_addr}] {
 				continue
 			}
 
 			// add jgf.Edge
  			jedges = append(jedges, jgf.Edge{
 				Source:   node_addr,
-				Relation: neighbor.LinkState.String(),
-				Target:   neighbor.MgmtIP,
+				Relation: "connected",//TODO neighbor.LinkState.String(),
+				Target:   neighbor_addr,
 				Directed: false,
 				Metadata: nil,
 			})
 
 			// update deduplication info
-			dedup[IpTuple{node_addr, neighbor.MgmtIP}] = true
+			dedup[IpTuple{node_addr, neighbor_addr}] = true
 		}
 	}
 
