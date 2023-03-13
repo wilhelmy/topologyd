@@ -1,4 +1,3 @@
 #+title: Notes
 * LLDP protocol details:
    - https://www.ieee802.org/1/files/public/docs2002/lldp-protocol-00.pdf
-   - http://www.circitor.fr/Mibs/Html/P/PTOPO-MIB.php

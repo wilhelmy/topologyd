@@ -1,3 +1,4 @@
+/* main file of topologyd. Contains glue code, main logic and HTTP handling. */
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"strings"
     "time"
 	"jgf"
+    "sort"
 )
 
 /**** Commandline arguments section ***************************************************/
@@ -43,12 +45,17 @@ var ARGV struct {
 
     // Prefer IPv6 addresses over IPv4 MgmtIPs returned via LLDP
     prefer_ipv6           bool
+
+    // Whether or not to query STP port state
+    query_stp_state       bool
+
+    // Whether or not to print the neighbors as they are gathered
+    gather_verbose        bool
 }
 
 
 /**** Debug section *******************************************************************/
 const dbg_http_query_verbose = false
-const dbg_gather_neighbors_verbose = true
 
 /**** Constants ***********************************************************************/
 const lldp_neighbor_path = "/lldp/neighbors"
@@ -96,7 +103,6 @@ func handle_graphviz_request(w http.ResponseWriter, req *http.Request) {
         return
     }
 
-    //g := assemble_graph(start, neighbors)
     res := generate_graphviz(start, neighbors)
 
     // MIME type according to https://www.iana.org/assignments/media-types/text/vnd.graphviz
@@ -109,9 +115,6 @@ func handle_graphviz_request(w http.ResponseWriter, req *http.Request) {
 // Handler function for incoming HTTP requests to resolve the network topology
 // and return the result in JSON Graph Format
 func handle_jgf_request(w http.ResponseWriter, req *http.Request) {
-    // XXX: deduplicate code between this and graphviz handler the next time
-    // you touch either of them
-
     start, neighbors := gather_neighbors_from_nodes()
 
     if neighbors == nil || start == "" {
@@ -204,8 +207,9 @@ func http_get(host string, path string) []byte {
 }
 
 /**** LLDP-HTTP interface *************************************************************/
-// the more wrappers, the better, right?
-func http_get_node_neighbor_info(host string) ([]Neighbor, error) {
+// HTTP GET request wrapper for the LLDP neighbors URL. Returns the parsed JSON
+// as a slice of struct Neighbor.
+func http_get_node_neighbor_info(host string) (NeighborSlice, error) {
     if host == "" {
         return nil, fmt.Errorf("http_get_node_neighbor_info called on empty string")
     }
@@ -216,7 +220,7 @@ func http_get_node_neighbor_info(host string) ([]Neighbor, error) {
     }
 
     // parse result as JSON
-    neighbors, err := Parse_lldpcli_neighbors_output(data)
+    neighbors, err := Parse_lldpcli_neighbors_output(host, data)
     if err != nil {
         log.Print(err)
     }
@@ -257,25 +261,40 @@ func bold(x string) string {
     return "\033[1;1m" + x + "\033[0;0m"
 }
 
+// Send HTTP GET request to obtain STP state from neighbor
+func (n *Neighbor) gather_node_stp_state() (err error) {
+    if (*n).PortState != nil {
+        return fmt.Errorf("neighbor link state is already populated: %v", *n)
+    }
+
+    mgmtip, err := get_suitable_mgmt_ip((*n).MgmtIPs)
+    if err != nil {return err}
+
+    stp := http_get_node_stp_link_state(mgmtip)
+    (*n).PortState = stp
+
+    return nil
+}
+
 // Map keyed by primary MgmtIP to that node's Neighbors
 type NodeMap map[string]NeighborSlice
 
-func dbg_gather(format string, arg... interface{}) {
-    if dbg_gather_neighbors_verbose {
+// Wrapper for verbose log messages used by the neighbor gathering process
+func log_gather(format string, arg... interface{}) {
+    if ARGV.gather_verbose {
         log.Printf(format, arg...)
     }
 }
 
 // Send HTTP GET requests to obtain neighbors from hosts and handle errors
-func get_node_neighbors(ip string) []Neighbor {
-    var cur []Neighbor
-    cur, err := http_get_node_neighbor_info(ip)
+func get_node_neighbors(ip string) (ret NeighborSlice) {
+    ret, err := http_get_node_neighbor_info(ip)
     if err != nil {
         log.Printf("GET neighbors from '%s': error: %s. Skipping.", ip, err)
-    } else if cur == nil {
+    } else if ret == nil {
         log.Printf("GET neighbors from '%s': something is fishy, no neighbors or error returned. Skipping.", ip)
     }
-    return cur
+    return
 }
 
 // Crawl the entire network for LLDP neighbors and STP state, returning a Map of
@@ -286,7 +305,7 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
     // a node has been queried before by setting its value to nil
     neighbors := make(NodeMap, ARGV.nodes_prealloc)
 
-    dbg_gather("== Begin gathering neighbors ==")
+    log_gather("== Begin gathering neighbors ==")
     start:= http_get_host_mgmt_ip(ARGV.start_host)
     ip   := start
     todo := []string{ ip }
@@ -295,31 +314,15 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
     for len(todo) > 0 {
         ip, todo = todo[0], todo[1:]
         iter++
-        dbg_gather(bold("Processing #%d (host %s), todo list: %v"), iter, ip, todo)
+        log_gather(bold("Processing #%d (host %s), todo list: %v"), iter, ip, todo)
 
         cur := get_node_neighbors(ip)
         if len(cur) < 1 {continue}
 
-        /* TODO refactor
-        // Send HTTP GET requests to obtain STP state from hosts and process the results
-        stp := http_get_node_stp_link_state(ip)
-        if stp == nil {
-            log.Printf("GET STP state from '%s': No result,", ip)
-        }
-        for i := range cur {
-            cur[i].LinkState = Unknown
-            var found bool
-            cur[i].LinkState, found = stp[cur[i].Name]
-            if !found {
-                log.Printf("LLDP information includes interface '%s' for which no STP information exists. Setting "+
-                    "to unknown.", cur[i].Name)
-            }
-        }
-        */
         neighbors[ip] = cur
 
         for i, neigh := range cur { // loop over all found neighbors
-            dbg_gather("Neighbor (%d/%d): %+v", i+1, len(cur), neigh)
+            log_gather("Neighbor (%d/%d): %+v", i+1, len(cur), neigh)
 
             newip, err := get_suitable_mgmt_ip(neigh.MgmtIPs)
             if err != nil {
@@ -336,66 +339,120 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
             }
         }
     }
-    dbg_gather("== End gathering neighbors ==")
+    log_gather("== End gathering neighbors ==")
+
+    if ARGV.query_stp_state {
+        log_gather("== Begin gathering STP state ==")
+        for _, v := range neighbors {
+            v.gather_stp_states()
+        }
+        log_gather("== End gathering STP state ==")
+    }
 
     return start, &neighbors
 }
 
-func graphviz_quote_array_of_mgmt_ips(in []string) []byte {
-    var buf bytes.Buffer
+// Given a primary MgmtIP address, find information about that host as seen by
+// any one of its peers that knows about it
+func (ns *NodeMap) mirror_mirror_on_the_wall(node string) Neighbor {
+    node_neighbors := (*ns)[node]
+    if len(node_neighbors) == 0 {return Neighbor{}} // a hermit has no neighbors
 
-    for _, v := range in {
-        if v != "" {
-            buf.WriteString(fmt.Sprintf(" \"%s\"", v))
-        }
+    for _, peer := range node_neighbors {
+        if peer.IsEmpty() {continue} // I never introduced myself when I moved in
+        peer_ip, err := get_suitable_mgmt_ip(peer.MgmtIPs)
+        if err != nil {continue}
+        peer_neighbors := (*ns)[peer_ip]
+
+        mirror_image, err := peer_neighbors.find_neighbor_by_ip(node)
+        if err != nil || mirror_image.IsEmpty() {continue}
+
+        return mirror_image
     }
-
-    return buf.Bytes()
+    return Neighbor{}
 }
 
+// Given 2 neighbors, iff they're directly connected, returns the "inferior"
+// PortState (i.e. smaller value of the PortState enum) of the two.
+func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
+    // all neighbors reported by node and peer
+    node_neighbors := (*ns)[node]
+    peer_neighbors := (*ns)[peer]
+
+    // find the Neighbor struct reported by each for the other
+    n1, _ := node_neighbors.find_neighbor_by_ip(peer)
+    n2, _ := peer_neighbors.find_neighbor_by_ip(node)
+
+    // this synchronization errors could occur if topologyd isn't running or
+    // mstpd doesn't work right
+    if n2.IsEmpty() {
+        log.Printf("Warning: no reply from peer %s reported by node %s as %+v. Is mstpd/topologyd running?", node, peer, n1)
+        return Unknown
+    }
+    if n1.IsEmpty() {
+        log.Printf("Warning: no reply from node %s reported by peer %s as %+v. Is mstpd/topologyd running?", peer, node, n2)
+        return Unknown
+    }
+
+    // FIXME if the same neighbor can be seen on multiple interfaces, this
+    // breaks. On a ring topology, the only case is two nodes connected in a
+    // ring. Evaluate under which other circumstances this can happen in other
+    // topologies.
+    if1 := n1.SourceIface
+    if2 := n2.SourceIface
+
+    if ps1,  ps2 := n1.PortState[if2], n2.PortState[if1];
+       ps1 < ps2 {
+        return ps1
+    } else {
+        return ps2
+    }
+}
+
+// generates graphviz output view for the graph
 func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     var buf bytes.Buffer
 
+    jgf := generate_jgf_graph(start, nodes)
+
     buf.WriteString("strict graph {\n")
 
-    hostnames := make(map[string]string, len(*nodes))
-    for _, v := range *nodes {
-        if v == nil {continue} // XXX FIXME lol
-        hostnames_k := v.get_hostnames()
-        for k, v := range hostnames_k {
-            hostnames[k] = v
-        }
+    // generate output for all individual nodes
+    lines := make([]string, len(jgf.Nodes))
+    for i, node := range jgf.Nodes {
+        meta := jgf_node_get_metadata(&node)
+        text := fmt.Sprintf("\t\"%s\" [shape=box,label=\""+
+            "Hostname: %s\\n"+
+            "%s: %s\\n"+
+            "IP: %s\"]",
+            node.Label, meta.Hostname, meta.IdType, meta.Identifier, node.Label)
+        lines[i] = text
     }
-
-    for k, v := range *nodes {
-        if v == nil {
-            log.Printf("Error: neighbor '%s' has nil neighbors instead "+
-                "of empty list. This can mean topologyd isn't running there or "+
-                "it is a bug.", k)
-            continue
-        }
-
-        buf.WriteString(fmt.Sprintf("\t\"%s\" [shape=box,label=\"Machine: %s\\n%s\"]; // node\n", k, hostnames[k], k))
-    }
+    // sort output to make it look predictably
+    lines = sort.StringSlice(lines)
+    // join all together and append to buffer
+    buf.WriteString(strings.Join(lines, "\n"))
     buf.WriteString("\n")
 
-    for k, v := range *nodes {
-        if v == nil {continue} // error already logged above
-        //mgmtlink := get_neighbor_mgmt_ips_link_state(v)
-        //neigh := graphviz_quote_array_of_mgmt_ip_link_states(mgmtlink)
-        mgmt := v.get_mgmt_ips()
-        neigh := graphviz_quote_array_of_mgmt_ips(mgmt)
-
-        buf.WriteString(fmt.Sprintf("\t\"%s\" -- {%s }; // edge\n", k, neigh))
-        /* TODO
-        for _, port := range mgmtlink {
-            if port.LinkState != Forwarding {
-                color := [...]string{ "brown", "lightgray", "darkgreen", "black" }[port.LinkState]
-                buf.WriteString(fmt.Sprintf("\t\"%s\" -- \"%s\" [color=%s]; // edge\n", k, port.MgmtIP, color))
-            }
+    // generate output for all individual edges
+    lines = make([]string, len(jgf.Edges))
+    for i, edge := range jgf.Edges {
+        // node connectivity status is displayed using different colors
+        color := "cyan" // well-visible fallback if STP is disabled
+        if ARGV.query_stp_state {
+            rel, err := ParsePortState(edge.Relation)
+            if err != nil {rel = Unknown}
+            color = rel.LinkColor()
         }
-        */
+        lines[i] = fmt.Sprintf("\t\"%s\" -- \"%s\" [color=\"%s\"]",
+            edge.Source, edge.Target, color)
     }
+    // sort output to make it look predictably
+    lines = sort.StringSlice(lines)
+    // join all together and append to buffer
+    buf.WriteString(strings.Join(lines, "\n"))
+    buf.WriteString("\n")
+
     buf.WriteString("}\n")
 
     return &buf
@@ -415,6 +472,8 @@ func main() {
     flag.StringVar(   &ARGV.netif_link_local_ipv6, "netif",            "br0", "network interface to use for IPv6 LL traffic")
     flag.BoolVar(     &ARGV.prefer_link_local, "prefer-link-local",     true, "prefer link local addresses from LLDP (otherwise, use the first one found)")
     flag.BoolVar(     &ARGV.prefer_ipv6,       "prefer-ipv6",           true, "prefer IPv6 addresses reported by LLDP (otherwise, use the first one found)")
+    flag.BoolVar(     &ARGV.query_stp_state,   "query-stp-state",       true, "enable querying STP state")
+    flag.BoolVar(     &ARGV.gather_verbose,    "gather-verbose",        true, "whether or not to print neighbors as they are gathered")
     flag.StringVar(   &ARGV.host_prefix,    "host-prefix",          "dc3500", "hostnames that don't start with this string generate a warning if found (set to '' to disable)")
     flag.Parse()
 

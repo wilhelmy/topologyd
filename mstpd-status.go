@@ -107,11 +107,15 @@ func (p *PortState) UnmarshalJSON(data []byte) (err error) {
     return nil
 }
 
+func (p PortState) LinkColor() string {
+	return [...]string{ "purple", "lightgray", "darkgreen", "black" }[p]
+}
+
 type PortToStateMap map[string]PortState
 
 // Format Mstpd_parse_port_state result into mstpd independent JSON format
-func STP_get_port_state_json(bridge_if string) (ret []byte) {
-	mjson, err := mstpd_get_showport_result(bridge_if)
+func STP_get_port_state_json(iface string) (ret []byte) {
+	mjson, err := mstpd_get_showport_result(iface)
 	if err != nil {log.Printf("mstpd json response error: %s", err); return}
 
 	ports, err := mstpd_parse_showport_result(mjson)

@@ -13,7 +13,6 @@ import (
 )
 
 /**** Debug section *******************************************************************/
-const dbg_json_verbose = false
 const dbg_read_json_from_file = false
 
 /**** lldpcli command interface *******************************************************/
@@ -141,8 +140,7 @@ func (chassis *LldpcliChassisMember) fix_mgmt_ip() {
 	(*chassis).MgmtIP = ips
 }
 
-// Returns the type of Chassis ID. Currently only MAC_ID is supported, everything
-// else returns UNKNOWN_ID
+// Returns the type of Chassis ID.
 func (chassis *LldpcliChassisMember) get_idtype() (idtype IdentifierType) {
 	idtype, ok := _IdMap[chassis.ID.Type]
 	if !ok {idtype = UNKNOWN_ID}
@@ -174,14 +172,6 @@ func get_suitable_mgmt_ip(MgmtIPs []string) (string, error) {
 	return MgmtIPs[0], nil
 }
 
-// conditionally log message to see if data parses correctly into the struct
-func dbg_json(obj interface{}) {
-	if dbg_json_verbose {
-		json, err := json.Marshal(&obj)
-		log.Print("Re-Marshaled JSON, error=", err, " -- ", string(json))
-	}
-}
-
 // parses "lldpcli -f json show chassis" output
 func lldp_parse_chassis_data(b []byte) (ret LocalChassis, err error) {
 	// Step 1: unmarshal into temporary struct
@@ -202,7 +192,7 @@ func lldp_parse_chassis_data(b []byte) (ret LocalChassis, err error) {
 
 	// Step 3: fix all managment IPs found in chassis
 	if len(cm) != 1 {
-		log.Println("lldpcli show chassis returns %d chassises, expected 1", len(cm))
+		log.Printf("lldpcli show chassis returns %d chassises, expected 1", len(cm))
 	}
 	for hostname, chassis := range cm {
 		chassis.fix_mgmt_ip()
@@ -225,10 +215,16 @@ type IdentifierType int
 const (
 	UNKNOWN_ID IdentifierType = iota
 	MAC_ID
+	LOCAL_ID
 )
 
 var _IdMap = map[string]IdentifierType{
-	"mac": MAC_ID,
+	"mac":   MAC_ID,
+	"local": LOCAL_ID,
+}
+
+func (t IdentifierType) String() string {
+	return []string{"UNKNOWN_ID", "MAC", "Local ID"}[t]
 }
 
 // Contains the same information as LldpcliNeighborInfo but sensibly flattened
@@ -238,9 +234,9 @@ type Neighbor struct {
 	Descr              string
 	Hostname           string
 	SourceIface        string
+	SourceNeighbor     string
 	MgmtIPs          []string
-	//Iface            LldpcliNeighborInterface
-	//LinkState        PortState // STP Link state
+	PortState          PortToStateMap // STP Link state
 }
 
 // For the local chassis, the data is almost the same, except SourceIface and
@@ -253,14 +249,15 @@ type NeighborSlice []Neighbor
 
 // There should only ever be one element in this map, and not all data is
 // actually used, so it gets flattened to our saner Neighbor type here
-func lldpcli_neighbor_interface_map_to_neighbor(ifmap LldpcliNeighborInterfaceMap) (n Neighbor) {
+func lldpcli_neighbor_interface_map_to_neighbor(host string, ifmap LldpcliNeighborInterfaceMap) (res Neighbor) {
 	if len(ifmap) != 1 {
 		// In this case, only the first one survives and the rest is
 		// thrown away. Should this ever happen, investigate why.
 		log.Printf("Incorrect number of interfaces in JSON object - possible bug, is this really lldpcli output?")
 	}
 
-	/* k = interface name ("eth0" etc), v = struct NeighborInterface */
+	/* sourceIface: interface name ("eth0" etc),
+	   neighborIface: struct LldpcliNeighborInterface */
 	for sourceIface, neighborIface := range ifmap {
 		var chassis     LldpcliChassisMember
 		var chassisName string
@@ -271,23 +268,26 @@ func lldpcli_neighbor_interface_map_to_neighbor(ifmap LldpcliNeighborInterfaceMa
 			break
 		}
 
-		n = Neighbor{
+		res = Neighbor{
+			//SourceNeighbor: sourceIface..
 			SourceIface:    sourceIface,
+			SourceNeighbor: host,
 			Hostname:       chassisName,
 			Identifier:     chassis.ID.Value,
 			IdType:         chassis.get_idtype(),
 			Descr:          chassis.Descr,
 			MgmtIPs:        chassis.MgmtIP.([]string),
+		// FIXME include neighborIface.Port (i.e. the remote port) in the data
+		// structure if useful or required later
 		}
-		fmt.Println(neighborIface.Port)
-		n.ValidateHostname()
+		res.ValidateHostname()
 		return
 	}
 	return
 }
 
 // parses "lldpcli -f json show neighbors" output
-func Parse_lldpcli_neighbors_output(b []byte) (NeighborSlice, error) {
+func Parse_lldpcli_neighbors_output(host string, b []byte) (NeighborSlice, error) {
 	// First pass: Unmarshal { "lldp": ...data }
 	var ln LldpcliNeighborInfo
 	if err := json.Unmarshal(b, &ln); err != nil {
@@ -321,42 +321,15 @@ func Parse_lldpcli_neighbors_output(b []byte) (NeighborSlice, error) {
 	   this is bad enough in JSON, but in Go each of these objects is
 	   Unmarshaled into a map of length 1 */
 	for i, ifmap := range inputs {
-		ifaces[i] = lldpcli_neighbor_interface_map_to_neighbor(ifmap)
+		ifaces[i] = lldpcli_neighbor_interface_map_to_neighbor(host, ifmap)
 	}
 
 	return ifaces, nil
 }
 
-
-/* TODO merge with other data type
-type MgmtIPLinkState struct {
-	MgmtIP    string
-	LinkState PortState
-}
-*/
-
-/* TODO
-func get_neighbor_mgmt_ips_link_state(src []Neighbor) (res []MgmtIPLinkState) {
-	res = make([]MgmtIPLinkState, len(*src))
-
-	for i, n := range src {
-		chassis, err := get_chassis(v.Iface.Chassis)
-		if err != nil {
-			log.Printf("Error: %s", err)
-			continue
-		}
-		state := v.LinkState
-		if err != nil {
-			log.Print(err)
-			state = Unknown
-		}
-		res[i] = MgmtIPLinkState { MgmtIP: get_mgmt_ip(&chassis), LinkState: state }
-	}
-
-	return
-}
-*/
-
+/**** struct Neighbor receiver functions **********************************************/
+// Validates hostname prefix for neighbors received via LLDP to make sure the
+// network does not contain any rogue elements
 func (n *Neighbor) ValidateHostname() {
 	if !(ARGV.host_prefix <= (*n).Hostname) {
         log.Printf("Found machine '%s' which is seemingly not a %s: %+v", n.Identifier,
@@ -364,6 +337,17 @@ func (n *Neighbor) ValidateHostname() {
 	}
 }
 
+// Checks whether or not this neighbor has been initialized with data
+func (n Neighbor) IsEmpty() bool {
+	return n.Descr == "" &&
+		n.Hostname == "" &&
+		n.IdType == UNKNOWN_ID &&
+		n.Identifier == "" &&
+		n.SourceIface == "" &&
+		len(n.MgmtIPs) == 0
+}
+
+/**** NeighborSlice receiver functions ************************************************/
 // Returns a map from MgmtIP to hostname reported via LLDP
 func (ns *NeighborSlice) get_hostnames() (res map[string]string) {
 	res = make(map[string]string, len(*ns))
@@ -377,6 +361,7 @@ func (ns *NeighborSlice) get_hostnames() (res map[string]string) {
 	return
 }
 
+// Returns a slice of one MgmtIP per host for a slice of Neighbor structs
 func (ns *NeighborSlice) get_mgmt_ips() (res []string) {
 	res = make([]string, len(*ns))
 	for i, n := range *ns {
@@ -389,22 +374,26 @@ func (ns *NeighborSlice) get_mgmt_ips() (res []string) {
 	return
 }
 
-/* TODO
-// returns a map
-func get_neighbor_hostnames(src []Neighbor) (res map[string]string) {
-	res = make(map[string]string, len(src))
-
-	for _, neigh := range src {
-		neigh.Hostname
-		chassis, host, err := get_chassis_hostname(v.Iface.Chassis)
-		if err != nil {
-			log.Printf("Error: %s", err)
-			continue
-		}
-		ip := get_suitable_mgmt_ip(chassis.MgmtIPs)(&chassis)
-		res[ip] = host
-	}
-	return
+// Retrieves STP information for all neighbors in the slice
+func (ns *NeighborSlice) gather_stp_states() {
+    for i, n := range *ns {
+        n.gather_node_stp_state()
+        (*ns)[i] = n
+    }
 }
 
-*/
+// Dummy error type for returning
+type NeighborNotFound error
+
+// Given a primary MgmtIP address, return the Neighbor
+func (ns *NeighborSlice) find_neighbor_by_ip(ip string) (Neighbor, NeighborNotFound) {
+	for _, n := range *ns {
+		for _, mip := range n.MgmtIPs {
+			if mip == ip {
+				return n, nil
+			}
+		}
+	}
+	var err NeighborNotFound
+	return Neighbor{}, err
+}

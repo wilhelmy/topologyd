@@ -1,9 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 
 	"jgf" // JGF data structures
@@ -15,7 +15,7 @@ type IpTuple struct {
 }
 
 // Takes starting node and NodeMap, outputs JGF formatted JSON into a bytes.Buffer
-func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
+func generate_jgf_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
 	// Step 1: loop over all nodes, creating jgf.Node objects and filling the
 	// list of nodes
 	jnodes := make([]jgf.Node, len(*nodes))
@@ -29,16 +29,10 @@ func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
             continue
 		}
 
-		/* {{{ XXX for debugging/development until we know which metadata we need */
-		md, err := json.Marshal(lldp_info)
-		// TODO add relevant info from node as metadata
-		_ = md;//XXX suppress go "unused variable" error
-		if err != nil { md = []byte{'"', 'N', 'o', 'p', 'e', '"'} }
-		/* }}} */
-
+		metadata, _ := json.Marshal(nodes.mirror_mirror_on_the_wall(node_addr))
 		jnodes[i] = jgf.Node{
 			Label:     node_addr,
-			Metadata:  nil /*md*/,
+			Metadata:  metadata,
 		}
 		i += 1
 	}
@@ -51,8 +45,6 @@ func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
 
 	for node_addr, lldp_info := range *nodes {
 		if lldp_info == nil { continue } // error already logged above
-		//neighbors := get_neighbor_mgmt_ips_link_state(lldp_info)
-		//neighbors := lldp_info.MgmtIPs
 		for _, neighbor := range lldp_info {
 			neighbor_addr, err := get_suitable_mgmt_ip(neighbor.MgmtIPs)
 			if err != nil {
@@ -66,10 +58,11 @@ func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
 				continue
 			}
 
+			link_state := nodes.stp_link_state(node_addr, neighbor_addr)
 			// add jgf.Edge
  			jedges = append(jedges, jgf.Edge{
 				Source:   node_addr,
-				Relation: "connected",//TODO neighbor.LinkState.String(),
+				Relation: link_state.String(),
 				Target:   neighbor_addr,
 				Directed: false,
 				Metadata: nil,
@@ -81,13 +74,19 @@ func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
 	}
 
 	// Step 3: Shove everything into a jgf.Graph
-	jgraph := jgf.Graph{
+	jgraph = jgf.Graph{
 		Type:     "graph",
 		Label:    fmt.Sprintf("Network topology as seen from %s", start),
 		Directed: false,
 		Nodes:    jnodes,
 		Edges:    jedges,
 	}
+
+	return
+}
+
+func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
+	jgraph := generate_jgf_graph(start, nodes)
 
 	// Step 4: Marshal data structure into JSON format
 	b, err := json.Marshal(jgraph)
@@ -98,4 +97,11 @@ func generate_json_graph(start string, nodes *NodeMap) *bytes.Buffer {
 
 	// Fin
 	return bytes.NewBuffer(b)
+}
+
+func jgf_node_get_metadata(jnode *jgf.Node) (Neighbor) {
+	var meta Neighbor
+	err := json.Unmarshal((*jnode).Metadata, &meta)
+	if err != nil {return Neighbor{}}
+	return meta
 }
