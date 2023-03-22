@@ -429,7 +429,7 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
         lines[i] = text
     }
     // sort output to make it look predictably
-    lines = sort.StringSlice(lines)
+    sort.Strings(lines)
     // join all together and append to buffer
     buf.WriteString(strings.Join(lines, "\n"))
     buf.WriteString("\n")
@@ -448,7 +448,7 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
             edge.Source, edge.Target, color)
     }
     // sort output to make it look predictably
-    lines = sort.StringSlice(lines)
+    sort.Strings(lines)
     // join all together and append to buffer
     buf.WriteString(strings.Join(lines, "\n"))
     buf.WriteString("\n")
