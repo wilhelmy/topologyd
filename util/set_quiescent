@@ -1,0 +1,29 @@
+#!/bin/sh
+# This script sets the quiescent topology for neighbor monitoring by sending
+# the appropriate HTTP POST request to topologyd
+
+set -euo pipefail
+
+usage() {
+	echo >&2 "Usage: $0 [--propagate] filename hashcode [host]"
+	echo >&2 "If no host is provided, the default is localhost:9090"
+	exit 1
+}
+[ $# -gt 1 ] && [ "$1" = "--help" -o "$1" = "-h" ] && usage
+
+propagate=false
+[ $# -gt 1 ] && [ "$1" = "--propagate" ] && propagate=true && shift
+[ $# -lt 1 ] && echo >&2 "Error: No filename provided" && usage
+[ $# -lt 2 ] && echo >&2 "Error: No hashcode provided" && usage
+[ $# -gt 3 ] && usage
+
+filename="$1"
+hashcode="$2"
+host=localhost:9090
+
+[ $# -gt 2 ] && host="$3"
+
+curl -v \
+     --header "Content-Type: application/vnd.jgf+json" \
+     --data "@$filename" \
+     http://"$host"/topology/quiescent?propagate=$propagate\&hashcode="$hashcode"

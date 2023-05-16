@@ -2,36 +2,34 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
-	"sort"
-	"io/ioutil"
-	"os"
 	"os/exec"
-	"encoding/json"
+	"sort"
 )
-
-/**** Debug section *******************************************************************/
-const dbg_read_json_from_file = false
 
 /**** lldpcli command interface *******************************************************/
 func run_lldpcli_show(arg string) ([]byte, error) {
 	var res []byte
 	var err error
+	cmd := exec.Command("lldpcli", "-f", "json", "show", arg)
 
-	if dbg_read_json_from_file { // i.e. for development purposes on x86 host
-		fd, _ := os.Open(fmt.Sprintf("./examples/lldpcli-show-%s.json", arg))
-		defer fd.Close()
-		return ioutil.ReadAll(fd)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
-	} else {
-		cmd := exec.Command("lldpcli", "-f", "json", "show", arg)
+	err = cmd.Run()
+	res = stdout.Bytes()
 
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		err = cmd.Run()
-		res = out.Bytes()
+	if len(stderr.Bytes()) > 0 {
+		log.Println("lldpcli said on stderr:", stderr.String())
+	}
+
+	if exitError, ok := err.(*exec.ExitError); ok {
+		return nil, fmt.Errorf("lldpcli returned nonzero exit code %d", exitError.ExitCode())
 	}
 
     return res, err
@@ -142,7 +140,7 @@ func (chassis *LldpcliChassisMember) fix_mgmt_ip() {
 
 // Returns the type of Chassis ID.
 func (chassis *LldpcliChassisMember) get_idtype() (idtype IdentifierType) {
-	idtype, ok := _IdMap[chassis.ID.Type]
+	idtype, ok := _id_map[chassis.ID.Type]
 	if !ok {idtype = UNKNOWN_ID}
 	return
 }
@@ -151,7 +149,7 @@ func (chassis *LldpcliChassisMember) get_idtype() (idtype IdentifierType) {
 // command line parameters
 func get_suitable_mgmt_ip(MgmtIPs []string) (string, error) {
 	if len(MgmtIPs) < 1 {
-		return "", fmt.Errorf("No IP address found for Neighbor (is it defined?)")
+		return "", fmt.Errorf("no IP address found for Neighbor (is it defined?)")
 	}
 
 	// For machines that have Link Local/IPv6 MgmtIPs available, prefer those
@@ -218,25 +216,44 @@ const (
 	LOCAL_ID
 )
 
-var _IdMap = map[string]IdentifierType{
-	"mac":   MAC_ID,
-	"local": LOCAL_ID,
+var _id_map = map[string]IdentifierType{
+	"mac":     MAC_ID,
+	"local":   LOCAL_ID,
+	"unknown": UNKNOWN_ID,
 }
 
 func (t IdentifierType) String() string {
-	return []string{"UNKNOWN_ID", "MAC", "Local ID"}[t]
+	return []string{"unknown", "mac", "local"}[t]
+}
+
+func (t IdentifierType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.String())
+}
+
+func (t *IdentifierType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	v, ok := _id_map[s]
+	if !ok {
+		*t = UNKNOWN_ID
+		return fmt.Errorf("%q is not a valid identifier type", s)
+	}
+	*t = v
+	return nil
 }
 
 // Contains the same information as LldpcliNeighborInfo but sensibly flattened
 type Neighbor struct {
-	Identifier         string // hopefully unique identifier used by this machine (MAC address)
-	IdType             IdentifierType
-	Descr              string
-	Hostname           string
-	SourceIface        string
-	SourceNeighbor     string
-	MgmtIPs          []string
-	PortState          PortToStateMap // STP Link state
+	Identifier         string            `json:"Identifier"`      // Unique identifier used by this machine (typically MAC address)
+	IdType             IdentifierType    `json:"IdentifierType"`  // Type of Identifier field (MAC, LOCAL, UNKNOWN)
+	Descr              string            `json:"Description"`     // Description (uname output unless altered by config file)
+	Hostname           string            `json:"Hostname"`        // Hostname (e.g. DC3500 something)
+	SourceIface        string            `json:"SourceInterface"` // Interface name on which this neighbor was found by the neighbor reporting it
+	SourceNeighbor     string            `json:"SourceNeighbor"`  // Primary MgmtIP address of neighbor which found this neighbor via LLDP
+	MgmtIPs          []string            `json:"MgmtIPs"`         // Management IPs of this neighbor reported by LLDP
+	PortState          PortToStateMap    `json:"STPPortState"`    // STP port state as reported by this neighbor
 }
 
 // For the local chassis, the data is almost the same, except SourceIface and
@@ -269,7 +286,6 @@ func lldpcli_neighbor_interface_map_to_neighbor(host string, ifmap LldpcliNeighb
 		}
 
 		res = Neighbor{
-			//SourceNeighbor: sourceIface..
 			SourceIface:    sourceIface,
 			SourceNeighbor: host,
 			Hostname:       chassisName,
@@ -278,7 +294,7 @@ func lldpcli_neighbor_interface_map_to_neighbor(host string, ifmap LldpcliNeighb
 			Descr:          chassis.Descr,
 			MgmtIPs:        chassis.MgmtIP.([]string),
 		// FIXME include neighborIface.Port (i.e. the remote port) in the data
-		// structure if useful or required later
+		// structure if desirable later
 		}
 		res.ValidateHostname()
 		return
@@ -287,7 +303,7 @@ func lldpcli_neighbor_interface_map_to_neighbor(host string, ifmap LldpcliNeighb
 }
 
 // parses "lldpcli -f json show neighbors" output
-func Parse_lldpcli_neighbors_output(host string, b []byte) (NeighborSlice, error) {
+func parse_lldpcli_neighbors_output(host string, b []byte) (NeighborSlice, error) {
 	// First pass: Unmarshal { "lldp": ...data }
 	var ln LldpcliNeighborInfo
 	if err := json.Unmarshal(b, &ln); err != nil {
@@ -382,18 +398,97 @@ func (ns *NeighborSlice) gather_stp_states() {
     }
 }
 
-// Dummy error type for returning
-type NeighborNotFound error
-
 // Given a primary MgmtIP address, return the Neighbor
-func (ns *NeighborSlice) find_neighbor_by_ip(ip string) (Neighbor, NeighborNotFound) {
+func (ns *NeighborSlice) find_neighbor_by_ip(ip string) (Neighbor, bool) {
 	for _, n := range *ns {
 		for _, mip := range n.MgmtIPs {
 			if mip == ip {
-				return n, nil
+				return n, true
 			}
 		}
 	}
-	var err NeighborNotFound
-	return Neighbor{}, err
+	return Neighbor{}, false
+}
+
+// Returns the parsed output from local "lldpcli show neighbors"
+func get_local_neighbors() (ns NeighborSlice, err error) {
+	bytes, err := run_lldpcli_show("neighbors")
+	if err != nil {return}
+	// LOCAL in all caps is used here to signify that this information didn't
+	// come from the network but from locally run lldpcli
+	// TODO replace by local identifier from lldp chassis
+	ns, err = parse_lldpcli_neighbors_output("LOCAL", bytes)
+	return
+}
+
+// Returns the MgmtIP from local "lldpcli show chassis"
+func get_local_chassis_mgmt_ip() (mgmtIP string, err error) {
+	bytes, err := run_lldpcli_show("chassis")
+	if err != nil {return}
+	chassis, err := lldp_parse_chassis_data(bytes)
+	if err != nil {return}
+	mgmtIP, err = get_suitable_mgmt_ip(chassis.MgmtIPs)
+	return
+}
+
+// Compare a set of neighbors to another set of neighbors (peers) and return the
+// set of peers which are expected and present (quiescent), excess as well as
+// the set of missing peers
+func (neighbors NeighborSlice) Compare(peers NeighborSlice) (quiescent NeighborSlice, excess NeighborSlice, missing NeighborSlice) {
+	seen := make(map[string]bool, len(neighbors))
+
+	// Step 1: set all IPs from neighbors to false in the map
+	for _, n := range neighbors {
+		ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
+		if err != nil {
+			log.Printf("Error getting MgmtIP from Neighbor %+v: %s", n, err)
+			continue
+		}
+		seen[ip] = false
+	}
+
+	// Step 2: for all IPs from peers, if they weren't in neighbors add them to
+	// the list of excess IPs. Set the intersection of peers and neighbors to
+	// true in the map, and add them to to_check for Step 4.
+	var to_check NeighborSlice
+	for _, n := range peers {
+		// FIXME rather than get_suitable_management_ips here the check should be
+		// whether or not the IP address is contained in MgmtIPs
+		ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
+		if err != nil {
+			log.Printf("Error getting MgmtIP from Neighbor %+v: %s", n, err)
+			continue
+		}
+		if _, exists := seen[ip]; !exists {
+			excess = append(excess, n)
+		} else {
+			to_check = append(to_check, n)
+		}
+		seen[ip] = true
+	}
+
+	// Step 3: loop over the map, adding all elements that are not in the
+	// intersection (i.e. still set to false) to missing.
+	for ip, exists := range seen {
+		if !exists {
+			for _, n := range neighbors {
+				// FIXME see above
+				n_ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
+				if err != nil {
+					log.Printf("Error getting MgmtIP from Neighbor %+v: %s", n, err)
+					continue // XXX add error
+				}
+				if ip == n_ip {
+					missing = append(missing, n)
+					break
+				}
+			}
+		}
+	}
+
+	// FIXME TODO Step 4: add IPs which are found but whose characteristics do
+	// not match to missing, with information about the mismatch.
+	quiescent = to_check
+
+	return
 }

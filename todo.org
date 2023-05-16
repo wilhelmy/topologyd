@@ -1,5 +1,5 @@
 #+TITLE: TODO list for topologyd
-#+TODO: TODO(t) PROJ(p) LOOP(r) STRT(s) WAIT(w) HOLD(h) IDEA(i) | DONE(d) KILL(k) [ ](T) [-](S) [?](W) | [X](D) | OKAY(o) YES(y) NO(n)
+#+TODO: TODO(t) PROJ(p) LOOP(r) STRT(s) WAIT(w) HOLD(h) IDEA(i) | DONE(d) KILL(k) "[ ]"(T) [-](S) [?](W) | [X](D) | OKAY(o) YES(y) NO(n)
 
 * TODO Authentication
 We probably will just use IPSec because we need/want it elsewhere anyway
@@ -9,13 +9,13 @@ protocol as the rest of the stack, such as ZeroMQ/protobuf, should we decide to
 use it.
 * NO Create go bindings to liblldpctl rather than calling the commandline tool?
 Seems like pointless overkill that doesn't add much value
-* TODO How to handle network failures? Timeouts?
+* DONE How to handle network failures? Timeouts?
 #+begin_example
 2022/10/27 11:23:58 Error querying http://172.29.201.1:9090/lldp/neighbors: Get "http://172.29.201.1:9090/lldp/neighbors": dial tcp 172.29.201.1:9090: i/o timeout
 #+end_example
 ** Reduced default HTTP timeout to 2s
 * TODO Add retries to HTTP GET?
-* TODO Parallelize GET requests with goroutines
+* IDEA Parallelize GET requests with goroutines?
 * TODO Handle "500 internal server error" if lldpcli can't be executed on the machine
 #+begin_src shell :results output
 curl -v localhost:9090/lldp/chassis 2>&1 | tr -d \\r
@@ -205,9 +205,10 @@ $ go run . -netif enp3s0
 2023/01/11 21:39:56 topologyd.go:216: == End gathering neighbors ==
 #+end_example
 
-* TODO Sort graphviz output
+* DONE Sort graphviz output
 Otherwise it jumps around depending on which nodes are listed first
-* TODO MgmtIP sometimes empty when a new host appears? workaround required
+* HOLD MgmtIP sometimes empty when a new host appears? workaround required
+I haven't seen this in a long time. Verify during testing stage if it still occurs.
 #+begin_example
 Jan 30 12:21:47 dc3500 topologyd[480]: 2023/01/30 12:21:47 lldpcli-json.go:148: MgmtIP[]: No IP address found for chassis {ID:{Type:mac Value:b6:fe:ef:00:00:22} Descr:DET Wayland dunfell-7.0 -27-g4846420 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64 MgmtIP:[] Capability:[{Type:Bridge Enabled:true} {Type:Router Enabled:false} {Type:Wlan Enabled:false} {Type:Station Enabled:false}]} (all empty?)
 Jan 30 12:21:49 dc3500 topologyd[480]: 2023/01/30 12:21:49 topologyd.go:261: == Begin gathering neighbors ==

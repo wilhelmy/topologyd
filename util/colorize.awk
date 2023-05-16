@@ -14,11 +14,11 @@ $4 == "Error:" || $4 == "Error" || $0 ~ /HTTP GET.*Internal Server Error/ {
 	next
 }
 
-$1 == "debug:" {
+$4 == "debug:" {
 	color_print("44", $0)
 	next
 }
-$1 == "debug1:" {
+$4 == "debug1:" {
 	color_print("44;3", $0)
 	next
 }

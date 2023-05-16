@@ -51,6 +51,12 @@ var ARGV struct {
 
     // Whether or not to print the neighbors as they are gathered
     gather_verbose        bool
+
+    // directory where data is stored
+    data_dir              string
+
+    // how often to check up on neighbors to identify topology changes
+    monitoring_freq       time.Duration
 }
 
 
@@ -65,6 +71,17 @@ const graphviz_path      = "/topology/graphviz"
 const jgf_path           = "/topology/jgf"
 
 /**** HTTP code ***********************************************************************/
+
+var http_handlers = make(map[string]http.HandlerFunc)
+// init is called once at program start before main()
+func init() {
+    http_handlers [lldp_neighbor_path]  = handle_lldp_request
+    http_handlers [lldp_chassis_path]   = handle_lldp_request
+    http_handlers [stp_port_state_path] = handle_stp_request
+    http_handlers [graphviz_path]       = handle_graphviz_request
+    http_handlers [jgf_path]            = handle_jgf_request
+}
+
 // Handler function for incoming HTTP requests to query the local node's
 // chassis or neighbor info
 func handle_lldp_request(w http.ResponseWriter, req *http.Request) {
@@ -123,7 +140,7 @@ func handle_jgf_request(w http.ResponseWriter, req *http.Request) {
         return
     }
 
-    res := generate_json_graph(start, neighbors)
+    res := jgf_generate_json(start, neighbors)
 
     // MIME type according to JGF Specification
     w.Header().Set("Content-Type", jgf.MIME_TYPE)
@@ -147,7 +164,23 @@ func handle_stp_request(w http.ResponseWriter, req *http.Request) {
     if _, err := w.Write(res); err != nil {
         log.Printf("Request for '%s' caused failure %s\n", req.URL.Path, err)
     }
+}
 
+// http_make_url turns a host and path into a full URL by adding IPv6LL zone and
+// port number, and wrapping IPv6 addresses in angle brackets
+func http_make_url(host string, path string) (url string) {
+    port := ARGV.port
+    zone := ""
+    if ip := net.ParseIP(host); ip.IsLinkLocalUnicast() {
+        // link local IPv6 address, need to append %netif, otherwise it can't be used
+        zone = "%25" + ARGV.netif_link_local_ipv6 //%25 = %
+    }
+    if strings.Contains(host, ":") {
+        // IPv6 addresses need to be wrapped in angle brackets
+        url = fmt.Sprintf("http://[%s%s]:%d%s", host, zone, port, path)
+    } else {
+        url = fmt.Sprintf("http://%s:%d%s", host, port, path)
+    }
     return
 }
 
@@ -159,18 +192,7 @@ func http_get(host string, path string) []byte {
         log.Printf("http_get called with empty host")
         return []byte{}
     }
-    var url string
-    zone := ""
-    if ip := net.ParseIP(host); ip.IsLinkLocalUnicast() {
-        // link local IPv6 address, need to append %netif, otherwise it can't be used
-        zone = "%25" + ARGV.netif_link_local_ipv6 //%25 = %
-    }
-    if strings.Index(host, ":") >= 0 {
-        // IPv6 addresses need to be wrapped in angle brackets
-        url = fmt.Sprintf("http://[%s%s]:%d%s", host, zone, ARGV.port, path)
-    } else {
-        url = fmt.Sprintf("http://%s:%d%s", host, ARGV.port, path)
-    }
+    url := http_make_url(host, path)
     client := http.Client{
         Timeout: ARGV.http_timeout,
     }
@@ -220,7 +242,7 @@ func http_get_node_neighbor_info(host string) (NeighborSlice, error) {
     }
 
     // parse result as JSON
-    neighbors, err := Parse_lldpcli_neighbors_output(host, data)
+    neighbors, err := parse_lldpcli_neighbors_output(host, data)
     if err != nil {
         log.Print(err)
     }
@@ -247,8 +269,8 @@ func http_get_host_mgmt_ip(host string) (ret string) {
     return
 }
 
-// Queries STP link state from host
-func http_get_node_stp_link_state(host string) (ret PortToStateMap) {
+// Queries STP port state from host
+func http_get_node_stp_port_state(host string) (ret PortToStateMap) {
     data := http_get(host, stp_port_state_path)
     if data == nil { return nil }
 
@@ -270,7 +292,7 @@ func (n *Neighbor) gather_node_stp_state() (err error) {
     mgmtip, err := get_suitable_mgmt_ip((*n).MgmtIPs)
     if err != nil {return err}
 
-    stp := http_get_node_stp_link_state(mgmtip)
+    stp := http_get_node_stp_port_state(mgmtip)
     (*n).PortState = stp
 
     return nil
@@ -364,8 +386,8 @@ func (ns *NodeMap) mirror_mirror_on_the_wall(node string) Neighbor {
         if err != nil {continue}
         peer_neighbors := (*ns)[peer_ip]
 
-        mirror_image, err := peer_neighbors.find_neighbor_by_ip(node)
-        if err != nil || mirror_image.IsEmpty() {continue}
+        mirror_image, ok := peer_neighbors.find_neighbor_by_ip(node)
+        if !ok || mirror_image.IsEmpty() {continue}
 
         return mirror_image
     }
@@ -413,7 +435,7 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
 func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     var buf bytes.Buffer
 
-    jgf := generate_jgf_graph(start, nodes)
+    jgf := jgf_generate_graph(start, nodes)
 
     buf.WriteString("strict graph {\n")
 
@@ -458,6 +480,12 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     return &buf
 }
 
+// Returns a filename suitable for opening/writing within topologyd's data
+// directory
+func datadir_file(filename string) string {
+    return strings.Join([]string{ARGV.data_dir, filename}, "/")
+}
+
 /**** Main loop ***********************************************************************/
 func main() {
     // add file name + line number to log output
@@ -475,20 +503,30 @@ func main() {
     flag.BoolVar(     &ARGV.query_stp_state,   "query-stp-state",       true, "enable querying STP state")
     flag.BoolVar(     &ARGV.gather_verbose,    "gather-verbose",        true, "whether or not to print neighbors as they are gathered")
     flag.StringVar(   &ARGV.host_prefix,    "host-prefix",          "dc3500", "hostnames that don't start with this string generate a warning if found (set to '' to disable)")
+    flag.StringVar(   &ARGV.data_dir,       "data-dir",     "/var/topologyd", "directory name where files are stored")
+    flag.DurationVar( &ARGV.monitoring_freq,"monitoring-freq", 2*time.Minute, "frequency of topology change monitoring (0 disables)")
     flag.Parse()
 
     if len(flag.Args()) > 0 {
         log.Fatalf("Error: extra arguments on commandline: %v", flag.Args())
     }
 
+    monitoring_init()
+
     // initialize http handlers
-    http.HandleFunc(lldp_neighbor_path,  handle_lldp_request)
-    http.HandleFunc(lldp_chassis_path,   handle_lldp_request)
+    for path, handler := range http_handlers {
+        http.HandleFunc(path, handler)
+    }
 
-    http.HandleFunc(stp_port_state_path, handle_stp_request)
-
-    http.HandleFunc(graphviz_path,       handle_graphviz_request)
-    http.HandleFunc(jgf_path,            handle_jgf_request)
+    if ARGV.monitoring_freq > 0 {
+        ticker := time.NewTicker(ARGV.monitoring_freq)
+        // start monitoring in a separate goroutine
+        go (func() {
+            for range ticker.C {
+                monitoring_tick()
+            }
+        })()
+    }
 
     // start httpd
     if err := http.ListenAndServe(fmt.Sprintf(":%d", ARGV.port), nil); err != nil {
