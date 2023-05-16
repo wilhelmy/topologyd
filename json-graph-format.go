@@ -28,10 +28,11 @@ func jgf_generate_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
             log.Printf("Error: neighbor '%s' has nil neighbors instead "+
                 "of empty list. This can mean topologyd isn't running there or "+
 				"it is a bug.", node_addr)
-            continue
 		}
 
-		metadata, _ := json.Marshal(nodes.mirror_mirror_on_the_wall(node_addr))
+		node_info := nodes.mirror_mirror_on_the_wall(node_addr)
+		metadata, _ := json.Marshal(node_info)
+		if node_info.IsEmpty() { metadata, _ = json.Marshal(nil) }
 		jnodes[i] = jgf.Node{
 			Label:     node_addr,
 			Metadata:  metadata,
