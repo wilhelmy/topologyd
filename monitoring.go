@@ -371,6 +371,20 @@ type TopologyStatusResponse struct {
 	Excess      []Neighbor          `json:"excess"`
 }
 
+// Marshal nil slices as empty JSON array rather than null
+func (r TopologyStatusResponse) MarshalJSON() ([]byte, error) {
+	type TSR TopologyStatusResponse
+
+	a := struct {TSR}{TSR: (TSR)(r)}
+
+	if a.Quiescent   == nil {a.Quiescent   = make([]Neighbor, 0)}
+	if a.Missing     == nil {a.Missing     = make([]Neighbor, 0)}
+	if a.Mismatching == nil {a.Mismatching = make([]NeighborWithError, 0)}
+	if a.Excess      == nil {a.Excess      = make([]Neighbor, 0)}
+
+	return json.Marshal(a)
+}
+
 // handle GET request for the topology state. Returns 3 sets of nodes: quiescent
 // nodes, excess nodes and missing nodes.
 func handle_topology_status(w http.ResponseWriter, req *http.Request) {
