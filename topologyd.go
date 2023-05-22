@@ -431,6 +431,21 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
     }
 }
 
+// Given two nodes, returns the name of the network interfaces on which source
+// sees target
+func (ns NodeMap) GetSourceIface(source string, target string) *string {
+    sn := ns[source]
+    if t, found := sn.find_neighbor_by_ip(target); !found {
+        return nil
+    } else if t.SourceNeighbor != source {
+        log.Printf("Huh??? Found neighbor of %s but the source neighbor isn't"+
+        " identical? Please report a bug. %+v", source, t)
+        return nil
+    } else {
+        return &t.SourceIface
+    }
+}
+
 // generates graphviz output view for the graph
 func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     var buf bytes.Buffer

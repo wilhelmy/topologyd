@@ -16,6 +16,11 @@ type IpTuple struct {
 	b string
 }
 
+type EdgeMetadata struct {
+	SourceInterface  *string `json:"SourceInterface"`
+	TargetInterface  *string `json:"TargetInterface"`
+}
+
 // Takes starting node and NodeMap, outputs a jgf.Graph data structure
 func jgf_generate_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
 	// Step 1: loop over all nodes, creating jgf.Node objects and filling the
@@ -65,6 +70,11 @@ func jgf_generate_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
 				continue
 			}
 
+			metadata, _ := json.Marshal(EdgeMetadata{
+				SourceInterface: nodes.GetSourceIface(node_addr, neighbor_addr),
+				TargetInterface: nodes.GetSourceIface(neighbor_addr, node_addr),
+			})
+
 			link_state := nodes.stp_link_state(node_addr, neighbor_addr)
 			// add jgf.Edge
  			jedges = append(jedges, jgf.Edge{
@@ -72,7 +82,7 @@ func jgf_generate_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
 				Relation: link_state.String(),
 				Target:   neighbor_addr,
 				Directed: false,
-				Metadata: nil,
+				Metadata: metadata,
 			})
 
 			// update deduplication info

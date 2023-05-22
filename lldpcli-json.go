@@ -250,8 +250,8 @@ type Neighbor struct {
 	IdType             IdentifierType    `json:"IdentifierType"`  // Type of Identifier field (MAC, LOCAL, UNKNOWN)
 	Descr              string            `json:"Description"`     // Description (uname output unless altered by config file)
 	Hostname           string            `json:"Hostname"`        // Hostname (e.g. DC3500 something)
-	SourceIface        string            `json:"SourceInterface"` // Interface name on which this neighbor was found by the neighbor reporting it
-	SourceNeighbor     string            `json:"SourceNeighbor"`  // Primary MgmtIP address of neighbor which found this neighbor via LLDP
+	SourceIface        string            `json:"-"`               // Interface name on which this neighbor was found by the neighbor reporting it
+	SourceNeighbor     string            `json:"-"`               // Primary MgmtIP address of neighbor which found this neighbor via LLDP
 	MgmtIPs          []string            `json:"MgmtIPs"`         // Management IPs of this neighbor reported by LLDP
 	PortState          PortToStateMap    `json:"STPPortState"`    // STP port state as reported by this neighbor
 }
