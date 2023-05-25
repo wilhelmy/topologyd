@@ -458,11 +458,16 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     lines := make([]string, len(jgf.Nodes))
     for i, node := range jgf.Nodes {
         meta := jgf_node_get_metadata(&node)
+        id := meta.Identifier
+        if id == "" {id = "undefined"}
         text := fmt.Sprintf("\t\"%s\" [shape=box,label=\""+
             "Hostname: %s\\n"+
-            "%s: %s\\n"+
+            "%s identifier: %s\\n"+
             "IP: %s\"]",
-            node.Label, meta.Hostname, meta.IdType, meta.Identifier, node.Label)
+            node.Label,
+            meta.Hostname,
+            strings.ToUpper(meta.IdType.String()), id,
+            node.Label)
         lines[i] = text
     }
     // sort output to make it look predictably
@@ -474,6 +479,14 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     // generate output for all individual edges
     lines = make([]string, len(jgf.Edges))
     for i, edge := range jgf.Edges {
+        // Add interface names to graph from Metadata
+        undefined := "UNDEFINED"
+        meta := jgf_edge_get_metadata(&edge)
+        if meta.SourceInterface == nil { meta.SourceInterface = &undefined }
+        if meta.TargetInterface == nil { meta.TargetInterface = &undefined }
+        labels := fmt.Sprintf(",taillabel=\"%v\",headlabel=\"%v\"",
+            *meta.SourceInterface, *meta.TargetInterface)
+
         // node connectivity status is displayed using different colors
         color := "cyan" // well-visible fallback if STP is disabled
         if ARGV.query_stp_state {
@@ -481,8 +494,8 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
             if err != nil {rel = Unknown}
             color = rel.LinkColor()
         }
-        lines[i] = fmt.Sprintf("\t\"%s\" -- \"%s\" [color=\"%s\"]",
-            edge.Source, edge.Target, color)
+        lines[i] = fmt.Sprintf("\t\"%s\" -- \"%s\" [color=\"%s\"%s]",
+            edge.Source, edge.Target, color, labels)
     }
     // sort output to make it look predictably
     sort.Strings(lines)

@@ -117,10 +117,19 @@ func jgf_generate_json(start string, nodes *NodeMap) *bytes.Buffer {
 	return bytes.NewBuffer(b)
 }
 
+// Unmarshals the JGF node metadata back to Neighbor
 func jgf_node_get_metadata(jnode *jgf.Node) (Neighbor) {
 	var meta Neighbor
 	err := json.Unmarshal((*jnode).Metadata, &meta)
 	if err != nil {return Neighbor{}}
+	return meta
+}
+
+// Unmarshals the JGF edge metadata back to EdgeMetadata
+func jgf_edge_get_metadata(jedge *jgf.Edge) (EdgeMetadata) {
+	var meta EdgeMetadata
+	err := json.Unmarshal((*jedge).Metadata, &meta)
+	if err != nil {return EdgeMetadata{}}
 	return meta
 }
 
