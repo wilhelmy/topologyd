@@ -150,19 +150,22 @@ func jgf_get_neighbors_primary_mgmtips(g jgf.Graph, node string) (ips []string) 
 }
 
 // Given a jgf.Graph and a node's primary MgmtIP, return all unmarshaled
-// metadata neighbors from the graph.
-func jgf_get_neighbors(g jgf.Graph, node string) (ns NeighborSlice, err error) {
-	todo := make(map[string]bool, len(g.Nodes))
-	for _, v := range jgf_get_neighbors_primary_mgmtips(g, node) {
-		todo[v] = true
+// metadata neighbors for this node from the graph.
+func jgf_get_neighbors(g jgf.Graph, node_ip string) (ns NeighborSlice, err error) {
+	is_neighbor := make(map[string]bool, len(g.Nodes))
+	for _, v := range jgf_get_neighbors_primary_mgmtips(g, node_ip) {
+		is_neighbor[v] = true
 	}
 
 	for k, v := range g.Nodes {
+		if _, found := is_neighbor[v.Label]; !found {continue} // not a neighbor
+
 		neigh := jgf_node_get_metadata(&v)
 		if neigh.IsEmpty() {
-			return nil, fmt.Errorf("Neighbor %v contains no data (no lldpd?)", k)
-
+			return nil, fmt.Errorf("Neighbor %v(%s) contains no data (no topologyd?)",
+				k, v.Label)
 		}
+
 		neigh.PortState = nil
 		ns = append(ns, neigh)
 	}

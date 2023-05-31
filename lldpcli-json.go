@@ -250,8 +250,8 @@ type Neighbor struct {
 	IdType             IdentifierType    `json:"IdentifierType"`  // Type of Identifier field (MAC, LOCAL, UNKNOWN)
 	Descr              string            `json:"Description"`     // Description (uname output unless altered by config file)
 	Hostname           string            `json:"Hostname"`        // Hostname (e.g. DC3500 something)
-	SourceIface        string            `json:"-"`               // Interface name on which this neighbor was found by the neighbor reporting it
-	SourceNeighbor     string            `json:"-"`               // Primary MgmtIP address of neighbor which found this neighbor via LLDP
+	SourceIface        string            `json:"SourceInterface"` // Interface name on which this neighbor was found by the neighbor reporting it
+	SourceNeighbor     string            `json:"SourceNeighbor"`  // Primary MgmtIP address of neighbor which found this neighbor via LLDP
 	MgmtIPs          []string            `json:"MgmtIPs"`         // Management IPs of this neighbor reported by LLDP
 	PortState          PortToStateMap    `json:"STPPortState"`    // STP port state as reported by this neighbor
 }
@@ -434,7 +434,8 @@ func get_local_chassis_mgmt_ip() (mgmtIP string, err error) {
 // Compare a set of neighbors to another set of neighbors (peers) and return the
 // set of peers which are expected and present (quiescent), excess as well as
 // the set of missing peers
-func (neighbors NeighborSlice) Compare(peers NeighborSlice) (quiescent NeighborSlice, excess NeighborSlice, missing NeighborSlice) {
+func (neighbors NeighborSlice) Compare(peers NeighborSlice) (r TopologyStatusResponse) {
+	// TODO this function isn't optimized for efficiency. Seems like O(n^2)
 	seen := make(map[string]bool, len(neighbors))
 
 	// Step 1: set all IPs from neighbors to false in the map
@@ -460,7 +461,7 @@ func (neighbors NeighborSlice) Compare(peers NeighborSlice) (quiescent NeighborS
 			continue
 		}
 		if _, exists := seen[ip]; !exists {
-			excess = append(excess, n)
+			r.Excess = append(r.Excess, n)
 		} else {
 			to_check = append(to_check, n)
 		}
@@ -474,21 +475,83 @@ func (neighbors NeighborSlice) Compare(peers NeighborSlice) (quiescent NeighborS
 			for _, n := range neighbors {
 				// FIXME see above
 				n_ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
-				if err != nil {
-					log.Printf("Error getting MgmtIP from Neighbor %+v: %s", n, err)
-					continue // XXX add error
-				}
+				if err != nil {continue} // error already logged in step 1 or 2
 				if ip == n_ip {
-					missing = append(missing, n)
+					r.Missing = append(r.Missing, n)
 					break
 				}
 			}
 		}
 	}
 
-	// FIXME TODO Step 4: add IPs which are found but whose characteristics do
-	// not match to missing, with information about the mismatch.
-	quiescent = to_check
+	// Step 4: add IPs which are found but whose characteristics do
+	// not match to mismatching, with information about the mismatch.
+	for _, p := range to_check {
+		for _, n := range neighbors {
+			// FIXME see above
+			n_ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
+			if err != nil {continue} // error already logged in step 1
+			p_ip, err := get_suitable_mgmt_ip(p.MgmtIPs)
+			if err != nil {continue} // error already logged in step 2
+
+			if n_ip != p_ip {continue} // not the peer we're looking for
+
+			if match, reason := compare_neighbors(&n, &p); match {
+				r.Quiescent = append(r.Quiescent, p)
+			} else {
+				r.Mismatching = append(r.Mismatching, NeighborWithError{
+					Neighbor: p,
+					Reason:   reason,
+				})
+			}
+		}
+	}
 
 	return
+}
+
+// Match a value of this neighbor
+func check_neigh(ip string, key string, nvalue string, pvalue string) (bool, Reason) {
+	if nvalue == pvalue { return true, Reason{} }
+
+	msg := fmt.Sprintf("%s mismatch for IP %s. Expected '%s', got '%s'",
+		key, ip, nvalue, pvalue)
+
+	return false, Reason{
+		Message:   msg,
+		Key:       key,
+		Expected:  nvalue,
+		Value:     pvalue,
+	}
+}
+
+func compare_neighbors(n *Neighbor, p *Neighbor) (bool, []Reason) {
+	var ok        bool
+	var r         Reason
+	var reasons []Reason
+
+	ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
+	if err != nil {
+		msg := fmt.Sprintf("Internal error: failed to get MgmtIP from node %v",
+			n.MgmtIPs)
+		log.Println(msg)
+		return false, []Reason{ Reason{Message: msg} }
+	}
+
+	ok,r = check_neigh(ip, "Description", n.Descr,      p.Descr)
+	if !ok {reasons = append(reasons, r)}
+
+	ok,r = check_neigh(ip, "Identifier",  n.Identifier, p.Identifier)
+	if !ok {reasons = append(reasons, r)}
+
+	ok,r = check_neigh(ip, "IdType",      n.IdType.String(), p.IdType.String())
+	if !ok {reasons = append(reasons, r)}
+
+	ok,r = check_neigh(ip, "Hostname",    n.Hostname,   p.Hostname)
+	if !ok {reasons = append(reasons, r)}
+
+	ok,r = check_neigh(ip, "SourceIface", n.SourceIface, p.SourceIface)
+	if !ok {reasons = append(reasons, r)}
+
+	return len(reasons) == 0, reasons
 }

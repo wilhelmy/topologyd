@@ -86,13 +86,43 @@ var NDB NeighborDB
 func (n *NeighborDB) Import(g jgf.Graph, hashcode string) (err error) {
 	n.Hashcode = hashcode
 
-	ip, err := get_local_chassis_mgmt_ip()
+	local_ip, err := get_local_chassis_mgmt_ip()
 	if err != nil {return}
 
-	nei, err := jgf_get_neighbors(g, ip)
+	nodes, err := jgf_get_neighbors(g, local_ip)
 	if err != nil {return}
 
-	n.Expected = nei
+	n.Expected = n.Expected[:0] // remove previous items
+
+	// Loop over all edges, finding the neighbor belonging to that edge if it
+	// touches this machine and setting the SourceIface to the correct value
+	// according to the edge definition.
+	for _, edge := range g.Edges {
+		var peer_ip string
+		iface := ""
+		meta := jgf_edge_get_metadata(&edge)
+		if edge.Source == local_ip {
+			peer_ip = edge.Target
+			if meta.SourceInterface != nil {
+				iface = *meta.SourceInterface
+			}
+		} else if edge.Target == local_ip {
+			peer_ip = edge.Source
+			if meta.TargetInterface != nil {
+				iface = *meta.TargetInterface
+			}
+		} else {
+			continue
+		}
+
+		peer, found := nodes.find_neighbor_by_ip(peer_ip)
+		if !found {continue} // this sure is someone's neighbor but not mine
+
+		peer.SourceIface    = iface
+		peer.SourceNeighbor = "LOCAL"
+
+		n.Expected = append(n.Expected, peer)
+	}
 
 	// This field is set when writing to disk, set to zero for visibility of
 	// potential bugs.
@@ -134,12 +164,15 @@ func (n NeighborDB) CompareCurrentNeighbors() (err error) {
 	current, err := get_local_neighbors()
 	if err != nil {return}
 
-	/* TODO reuse code from scan API endpoint */
-	quiescent, excess, missing := n.Expected.Compare(current)
+	r := n.Expected.Compare(current)
 
-	log.Println("quiescent:", quiescent)
-	log.Println("excess:   ", excess)
-	log.Println("missing:  ", missing)
+	// TODO the results should be sent over a yet-to-be-defined protocol. Right
+	// now, they just go to the log.
+	log.Println("== Monitoring poll cycle ==")
+	log.Println("quiescent:", r.Quiescent)
+	log.Println("excess:   ", r.Excess)
+	log.Println("missing:  ", r.Missing)
+	log.Println("mismatch: ", r.Mismatching)
 
 	return nil
 }
@@ -359,16 +392,24 @@ func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 	w.Write(response)
 }
 
-type NeighborWithError struct {
-	Neighbor      Neighbor          `json:"neighbor"`
-	Reason        string            `json:"reason"`
-}
 type TopologyStatusResponse struct {
 	Hashcode      string            `json:"hashcode"`
 	Quiescent   []Neighbor          `json:"quiescent"`
 	Missing     []Neighbor          `json:"missing"`
 	Mismatching []NeighborWithError	`json:"mismatching"`
 	Excess      []Neighbor          `json:"excess"`
+}
+
+type Reason struct {
+	Key           string            `json:"key"`
+	Value         string            `json:"value"`
+	Expected      string            `json:"expected"`
+	Message       string            `json:"message"`
+}
+
+type NeighborWithError struct {
+	Neighbor      Neighbor          `json:"neighbor"`
+	Reason      []Reason            `json:"reason"`
 }
 
 // Marshal nil slices as empty JSON array rather than null
@@ -412,16 +453,8 @@ func handle_topology_status(w http.ResponseWriter, req *http.Request) {
 	current, err := get_local_neighbors()
 	if err != nil {return}
 
-	var r TopologyStatusResponse
-	var mismatch []Neighbor
+	r := n.Expected.Compare(current)
 	r.Hashcode = n.GetHashcode()
-	r.Quiescent, r.Excess, mismatch = n.Expected.Compare(current)
-
-	// TODO XXX this should have the actual mismatch information from Compare()
-	for _, v := range mismatch {
-		r.Mismatching = append(r.Mismatching,
-			NeighborWithError{v, "Neighbor does not match configuration!"})
-	}
 
 	response, err := json.Marshal(r)
 	if err != nil {
@@ -440,7 +473,7 @@ func handle_topology_status(w http.ResponseWriter, req *http.Request) {
 // main function of the monitoring goroutine (which runs in parallel to the REST
 // API handlers at an interval defined via ARGV - see main()), which verifies
 // all expected neighbors are present in regular intervals and reports missing
-// ones over a yet-to-be-defined interface.
+// ones over a yet-to-be-defined interface (TODO).
 func monitoring_tick() {
 	if err := NDB.CompareCurrentNeighbors(); err != nil {
 		log.Printf("Error comparing neighbors: %s", err)
