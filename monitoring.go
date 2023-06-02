@@ -392,6 +392,7 @@ func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 	w.Write(response)
 }
 
+// The response JSON for /topology/status
 type TopologyStatusResponse struct {
 	Hashcode      string            `json:"hashcode"`
 	Quiescent   []Neighbor          `json:"quiescent"`
@@ -400,6 +401,7 @@ type TopologyStatusResponse struct {
 	Excess      []Neighbor          `json:"excess"`
 }
 
+// Mismatch reason
 type Reason struct {
 	Key           string            `json:"key"`
 	Value         string            `json:"value"`
@@ -407,6 +409,7 @@ type Reason struct {
 	Message       string            `json:"message"`
 }
 
+// Mismatching neighbors with all mismatch reasons
 type NeighborWithError struct {
 	Neighbor      Neighbor          `json:"neighbor"`
 	Reason      []Reason            `json:"reason"`

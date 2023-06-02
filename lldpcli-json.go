@@ -510,7 +510,8 @@ func (neighbors NeighborSlice) Compare(peers NeighborSlice) (r TopologyStatusRes
 	return
 }
 
-// Match a value of this neighbor
+// Match a string value of two neighbors, generating an appropriate Reason{} in
+// case of mismatch.
 func check_neigh(ip string, key string, nvalue string, pvalue string) (bool, Reason) {
 	if nvalue == pvalue { return true, Reason{} }
 
@@ -525,6 +526,35 @@ func check_neigh(ip string, key string, nvalue string, pvalue string) (bool, Rea
 	}
 }
 
+// Given slices of MgmtIPs returns true if that match and otherwise generates a
+// Reason{} why they mismatch
+func check_ips(ip string, nips []string, pips []string) (bool, Reason) {
+	sort.Strings(nips)
+	sort.Strings(pips)
+
+	if len(nips) != len(pips) {goto not_equal}
+
+	for i := range nips {
+		if nips[i] != pips[i] {
+			goto not_equal
+		}
+	}
+	return true, Reason{}
+
+not_equal:
+	return false, Reason{
+		Message: fmt.Sprintf(
+			"MgmtIP mismatch for IP %s. Expected '%v', got '%v'",
+			ip, nips, pips,
+		),
+		Key: "MgmtIPs",
+		Expected: fmt.Sprintf("%+v", nips),
+		Value: fmt.Sprintf("%+v", pips),
+	}
+}
+
+// Given two neighbors, returns whether or not they mismatch, and if so, the
+// list of reasons why.
 func compare_neighbors(n *Neighbor, p *Neighbor) (bool, []Reason) {
 	var ok        bool
 	var r         Reason
@@ -551,6 +581,9 @@ func compare_neighbors(n *Neighbor, p *Neighbor) (bool, []Reason) {
 	if !ok {reasons = append(reasons, r)}
 
 	ok,r = check_neigh(ip, "SourceIface", n.SourceIface, p.SourceIface)
+	if !ok {reasons = append(reasons, r)}
+
+	ok,r = check_ips(ip, n.MgmtIPs, p.MgmtIPs)
 	if !ok {reasons = append(reasons, r)}
 
 	return len(reasons) == 0, reasons
