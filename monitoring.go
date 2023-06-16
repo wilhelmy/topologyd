@@ -54,14 +54,13 @@ func write_datadir_file(fname string, buf []byte) (err error) {
 	// Atomically rename a temporary file here to avoid race conditions where
 	// e.g. half of the file is written in another goroutine and garbled file
 	// contents are read back in by accident.
-	f, err := os.CreateTemp(ARGV.data_dir, fname+"*.tmp")
-	if err != nil {return}
+	f, err := ioutil.TempFile(ARGV.data_dir,
+		fmt.Sprintf("%s.tmp.*.pid=%d", fname, os.Getpid()))
+
 	tmpfile := f.Name()
+	defer os.Remove(tmpfile)
 
-	_, err = f.Write(buf)
-	if err != nil {return}
-
-	err = f.Close()
+	err = ioutil.WriteFile(tmpfile, buf, 0644)
 	if err != nil {return}
 
 	err = os.Rename(tmpfile, ARGV.data_dir+"/"+fname)
