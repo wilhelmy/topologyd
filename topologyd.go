@@ -408,11 +408,11 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
     // this synchronization errors could occur if topologyd isn't running or
     // mstpd doesn't work right
     if n2.IsEmpty() {
-        log.Printf("Warning: no reply from peer %s reported by node %s as %+v. Is mstpd/topologyd running?", node, peer, n1)
+        log.Printf("Warning: no reply from peer %s reported by node %s as %+v. Is mstpd/topologyd running?", peer, node, n1)
         return Unknown
     }
     if n1.IsEmpty() {
-        log.Printf("Warning: no reply from node %s reported by peer %s as %+v. Is mstpd/topologyd running?", peer, node, n2)
+        log.Printf("Warning: no reply from node %s reported by peer %s as %+v. Is mstpd/topologyd running?", node, peer, n2)
         return Unknown
     }
 
