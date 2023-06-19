@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -203,6 +204,7 @@ func monitoring_quiescent_propagate(g jgf.Graph, body io.Reader) (bool, map[stri
 	}
 	for _, v := range g.Nodes {
 		host := v.Label
+		// XXX use function
 		if host == localIP {continue} // skip over local machine
 		if host == "" { // XXX drop this as soon as it's found, not here
 			log.Println("Host without IP address (no topologyd/lldpd?). Skipping")
@@ -372,7 +374,8 @@ func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Attempt propgagation, returning errors to client
-	ok, errs := monitoring_quiescent_propagate(g, req.Body)
+	body_bag := bytes.NewBuffer(body)
+	ok, errs := monitoring_quiescent_propagate(g, body_bag)
 	var response []byte
 	if !ok {
 		response, err = json.Marshal(errs)
@@ -383,12 +386,15 @@ func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, msg, statuscode)
 			return
 		}
+		statuscode = http.StatusFailedDependency
+		msg = "Propagation error"
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statuscode)
+		w.Write(response)
+		return
 	}
-	statuscode = http.StatusFailedDependency
-	msg = "Propagation error"
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statuscode)
-	w.Write(response)
+	log.Println("Propagation succeded!")
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // The response JSON for /topology/status
