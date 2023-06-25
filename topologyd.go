@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
     "net"
+    "net/url"
 	"net/http"
 	"strings"
     "time"
@@ -182,6 +183,15 @@ func http_make_url(host string, path string) (url string) {
         url = fmt.Sprintf("http://%s:%d%s", host, port, path)
     }
     return
+}
+
+// Given an URL, serializes value into query string
+func http_url_attach_query_string(uri string, key string, value string) string {
+    u, _ := url.Parse(uri) // discarding error, don't use function with untrusted input
+    v := u.Query()
+    v.Add(key, value)
+    u.RawQuery = v.Encode()
+    return u.String()
 }
 
 // Send HTTP GET requests to specified node, logs errors and discards malformed

@@ -134,13 +134,13 @@ func jgf_edge_get_metadata(jedge *jgf.Edge) (EdgeMetadata) {
 }
 
 
-// Given a jgf.Graph and a node's primary MgmtIP, pull all MgmtIPs of immediate
+// Given a jgf.Graph and a node's MgmtIPs, pull all MgmtIPs of immediate
 // neighbor nodes from the graph
-func jgf_get_neighbors_primary_mgmtips(g jgf.Graph, node string) (ips []string) {
+func jgf_get_neighbors_primary_mgmtips(g jgf.Graph, node_ips MgmtIPs) (ips []string) {
 	for _, v := range g.Edges {
-		if v.Source == node {
+		if node_ips.Contains(v.Source) {
 			ips = append(ips, v.Target)
-		} else if v.Target == node {
+		} else if node_ips.Contains(v.Target) {
 			ips = append(ips, v.Source)
 		}
 	}
@@ -149,11 +149,11 @@ func jgf_get_neighbors_primary_mgmtips(g jgf.Graph, node string) (ips []string) 
 	return
 }
 
-// Given a jgf.Graph and a node's primary MgmtIP, return all unmarshaled
+// Given a jgf.Graph and a node's MgmtIPs, return all unmarshaled
 // metadata neighbors for this node from the graph.
-func jgf_get_neighbors(g jgf.Graph, node_ip string) (ns NeighborSlice, err error) {
+func jgf_get_neighbors(g jgf.Graph, node_ips MgmtIPs) (ns NeighborSlice, err error) {
 	is_neighbor := make(map[string]bool, len(g.Nodes))
-	for _, v := range jgf_get_neighbors_primary_mgmtips(g, node_ip) {
+	for _, v := range jgf_get_neighbors_primary_mgmtips(g, node_ips) {
 		is_neighbor[v] = true
 	}
 

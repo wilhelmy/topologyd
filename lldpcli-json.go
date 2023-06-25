@@ -421,13 +421,24 @@ func get_local_neighbors() (ns NeighborSlice, err error) {
 	return
 }
 
+// Type alias to create receiver functions
+type MgmtIPs []string
+
+// Linear search over MgmtIPs
+func (M *MgmtIPs) Contains(ip string) bool {
+	for _, v := range *M {
+		if ip == v {return true}
+	}
+	return false
+}
+
 // Returns the MgmtIP from local "lldpcli show chassis"
-func get_local_chassis_mgmt_ip() (mgmtIP string, err error) {
+func get_local_chassis_mgmt_ips() (mgmtIPs MgmtIPs, err error) {
 	bytes, err := run_lldpcli_show("chassis")
 	if err != nil {return}
 	chassis, err := lldp_parse_chassis_data(bytes)
 	if err != nil {return}
-	mgmtIP, err = get_suitable_mgmt_ip(chassis.MgmtIPs)
+	mgmtIPs = chassis.MgmtIPs
 	return
 }
 
