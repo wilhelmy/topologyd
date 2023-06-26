@@ -529,8 +529,9 @@ func handle_topology_status(w http.ResponseWriter, req *http.Request) {
 type TopologyScanResponse map[string]*TopologyStatusResponse
 
 func request_topology_status(ip string) (tsr TopologyStatusResponse, err error) {
+	client  := http.Client{Timeout: ARGV.http_timeout}
 	url := http_make_url(ip, _status_api_path)
-	resp, err := http.Get(url)
+	resp, err := client.Get(url)
 	if err != nil {return}
 
 	if resp.StatusCode != http.StatusOK {
