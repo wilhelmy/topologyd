@@ -58,6 +58,7 @@ func write_datadir_file(fname string, buf []byte) (err error) {
 	// contents are read back in by accident.
 	f, err := ioutil.TempFile(ARGV.data_dir,
 		fmt.Sprintf("%s.tmp.*.pid=%d", fname, os.Getpid()))
+	if err != nil {return}
 
 	tmpfile := f.Name()
 	defer os.Remove(tmpfile)
