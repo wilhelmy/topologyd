@@ -23,6 +23,7 @@ const (
 	_quiescent_filename = "quiescent.json"
 	_quiescent_api_path = "/topology/quiescent"
 	_status_api_path    = "/topology/status"
+	_scan_api_path      = "/topology/scan"
 )
 
 /**** functions managing files in the data directory **********************************/
@@ -603,7 +604,7 @@ func monitoring_tick() {
 func monitoring_init() {
     http_handlers [_quiescent_api_path] = handle_topology_quiescent
 	http_handlers [_status_api_path] = handle_topology_status
-	http_handlers ["/topology/scan"] = handle_topology_scan
+	http_handlers [_scan_api_path] = handle_topology_scan
 
 	var err error
 	NDB, err = read_neighbor_db_file()
