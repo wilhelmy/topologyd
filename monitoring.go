@@ -208,10 +208,15 @@ func monitoring_jgf_valid(g jgf.Graph) (error) {
 	return nil
 }
 
+type MonitoringHostStatus struct {
+    Error       bool      `json:"error"`
+	Message     string    `json:"message,omitempty"`
+}
+
 // monitoring_quiescent_propagate forwards the information received from
 // DPT/configuration utility to all other machines as the new quiescent state
-func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode string) (bool, map[string]string) {
-	results := make(map[string]string, len(g.Nodes)-1)
+func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode string) (bool, map[string]MonitoringHostStatus) {
+	results := make(map[string]MonitoringHostStatus, len(g.Nodes)-1)
 	client  := http.Client{Timeout: ARGV.http_timeout}
 	errors  := 0
 
@@ -244,7 +249,7 @@ func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode st
 		req, err := http.NewRequest("POST", url, body)
 		if err != nil { // huh??
 			log.Println("Error creating HTTP request:", err)
-			results[host] = err.Error()
+			results[host] = MonitoringHostStatus{Error: true, Message: err.Error()}
 			errors++
 			continue
 		}
@@ -252,7 +257,7 @@ func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode st
 		resp, err := client.Do(req)
 
 		if err != nil {
-			results[host] = err.Error()
+			results[host] = MonitoringHostStatus{Error: true, Message: err.Error()}
 			log.Println("propagation:", err)
 			errors++
 			continue
@@ -265,19 +270,20 @@ func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode st
 		if err != nil {
 			log.Printf("propagation: Error reading HTTP response for %s: %v",
 				resp.Request.URL.String(), err)
-			results[host] = err.Error()
+			results[host] = MonitoringHostStatus{Error: true, Message: err.Error()}
 			errors++
 			continue
 		}
 
 		if resp.StatusCode != 202 {
-			results[host] = fmt.Sprintf("Host returned HTTP status %s - %s",
+			errstr := fmt.Sprintf("Host returned HTTP status %s - %s",
 				resp.Status, res)
+			results[host] = MonitoringHostStatus{Error: true, Message: errstr}
 			errors++
 		} else {
 			// set to nil if no error, so the client can identify all hosts that
 			// accepted the topology change
-			results[host] = "OK"
+			results[host] = MonitoringHostStatus{Error: false, Message: ""}
 		}
 	}
 	return errors == 0, results
