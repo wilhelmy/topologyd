@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"sync"
 )
 
 /**** Constants - filenames and API endpoints *****************************************/
@@ -213,20 +214,61 @@ type MonitoringHostStatus struct {
 	Message     string    `json:"message,omitempty"`
 }
 
+// monitoring_quiescent_propagate_one propagates the new quiescent topology to one host
+func monitoring_quiescent_propagate_one(url string, body io.ReadSeeker) (status MonitoringHostStatus) {
+	client  := http.Client{Timeout: ARGV.http_timeout}
+
+	// body points to the end of the buffer after every request, return to
+	// the beginning for the next one
+	body.Seek(0, 0)
+
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		log.Println("Error creating HTTP request:", err)
+		return MonitoringHostStatus{Error: true, Message: err.Error()}
+	}
+	req.Header.Set("Content-Type", jgf.MIME_TYPE)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println("propagation:", err)
+		return MonitoringHostStatus{Error: true, Message: err.Error()}
+	}
+	log.Printf("propagation: POST %s status=%s", url, resp.Status)
+
+	defer resp.Body.Close()
+
+	res, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("propagation: Error reading HTTP response for %s: %v",
+			resp.Request.URL.String(), err)
+		return MonitoringHostStatus{Error: true, Message: err.Error()}
+	}
+
+	if resp.StatusCode != 202 {
+		errstr := fmt.Sprintf("Host returned HTTP status %s - %s",
+			resp.Status, res)
+		return MonitoringHostStatus{Error: true, Message: errstr}
+	}
+
+	return MonitoringHostStatus{Error: false, Message: ""}
+}
+
 // monitoring_quiescent_propagate forwards the information received from
 // DPT/configuration utility to all other machines as the new quiescent state
 func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode string) (bool, map[string]MonitoringHostStatus) {
 	results := make(map[string]MonitoringHostStatus, len(g.Nodes)-1)
-	client  := http.Client{Timeout: ARGV.http_timeout}
-	errors  := 0
+	errors  := false
 
 	log.Println("Propagating new topology...")
 
-	// TODO parallelize HTTP requests to avoid taking too long
 	localIPs, err := get_local_chassis_mgmt_ips()
 	if err != nil {
 		log.Println("Unable to get local management IP; configuration error?", err)
 	}
+
+	var wg sync.WaitGroup // used for parallelization of requests
+	var results_mutex = &sync.RWMutex{}
 
 	for _, v := range g.Nodes {
 		host := v.Label
@@ -238,55 +280,26 @@ func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode st
 			log.Println("propagation: Skipping host without IP address (no topologyd/lldpd?)")
 			continue
 		}
-
 		url := http_url_attach_query_string(
 			http_make_url(host, _quiescent_api_path),
 			"hashcode", hashcode)
 
-		// body points to the end of the buffer after every request, return to
-		// the beginning for the next one
-		body.Seek(0, 0)
-		req, err := http.NewRequest("POST", url, body)
-		if err != nil { // huh??
-			log.Println("Error creating HTTP request:", err)
-			results[host] = MonitoringHostStatus{Error: true, Message: err.Error()}
-			errors++
-			continue
-		}
-		req.Header.Set("Content-Type", jgf.MIME_TYPE)
-		resp, err := client.Do(req)
-
-		if err != nil {
-			results[host] = MonitoringHostStatus{Error: true, Message: err.Error()}
-			log.Println("propagation:", err)
-			errors++
-			continue
-		}
-		log.Printf("propagation: POST %s status=%s", url, resp.Status)
-
-		defer resp.Body.Close()
-
-		res, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			log.Printf("propagation: Error reading HTTP response for %s: %v",
-				resp.Request.URL.String(), err)
-			results[host] = MonitoringHostStatus{Error: true, Message: err.Error()}
-			errors++
-			continue
-		}
-
-		if resp.StatusCode != 202 {
-			errstr := fmt.Sprintf("Host returned HTTP status %s - %s",
-				resp.Status, res)
-			results[host] = MonitoringHostStatus{Error: true, Message: errstr}
-			errors++
-		} else {
-			// set to nil if no error, so the client can identify all hosts that
-			// accepted the topology change
-			results[host] = MonitoringHostStatus{Error: false, Message: ""}
-		}
+		// call monitoring_quiescent_propagate_one in parallel goroutines
+		wg.Add(1)
+		go func(host string, url string, body io.ReadSeeker) {
+			defer wg.Done()
+			status := monitoring_quiescent_propagate_one(url, body)
+			results_mutex.Lock()
+			results[host] = status
+			results_mutex.Unlock()
+			if status.Error {
+				errors = true
+			}
+		}(host, url, body)
 	}
-	return errors == 0, results
+	wg.Wait()
+
+	return !errors, results
 }
 
 // Given a definition of a quiescent topology, determine whether or not it
