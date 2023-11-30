@@ -2,17 +2,17 @@
 package main
 
 import (
-	"bytes"
-	"flag"
-	"fmt"
-	"io/ioutil"
-	"log"
+    "bytes"
+    "flag"
+    "fmt"
+    "io/ioutil"
+    "log"
     "net"
     "net/url"
-	"net/http"
-	"strings"
+    "net/http"
+    "strings"
     "time"
-	"jgf"
+    "jgf"
     "sort"
 )
 

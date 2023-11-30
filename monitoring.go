@@ -198,8 +198,7 @@ func read_quiescent_topology() (g jgf.Graph, err error) {
 
 /**** Helper functions for validating and propagating API requests ********************/
 
-// Returns true if the jgf input is valid for monitoring purposes, and false as
-// well as a reason if it isn't
+// Returns nil if the jgf input is valid for monitoring purposes, otherwise an Error
 func monitoring_jgf_valid(g jgf.Graph) (error) {
 	// TODO add more validation here
 	if g.Directed != false {
@@ -209,13 +208,14 @@ func monitoring_jgf_valid(g jgf.Graph) (error) {
 	return nil
 }
 
-type MonitoringHostStatus struct {
-    Error       bool      `json:"error"`
-	Message     string    `json:"message,omitempty"`
+// Contains the propagation response state as well as optionally an error
+type TopologyPropagationResponse struct {
+    State       string    `json:"state"`
+	Error       string    `json:"error,omitempty"`
 }
 
 // monitoring_quiescent_propagate_one propagates the new quiescent topology to one host
-func monitoring_quiescent_propagate_one(url string, body io.ReadSeeker) (status MonitoringHostStatus) {
+func monitoring_quiescent_propagate_one(url string, body io.ReadSeeker) (status TopologyPropagationResponse) {
 	client  := http.Client{Timeout: ARGV.http_timeout}
 
 	// body points to the end of the buffer after every request, return to
@@ -225,14 +225,14 @@ func monitoring_quiescent_propagate_one(url string, body io.ReadSeeker) (status 
 	req, err := http.NewRequest("POST", url, body)
 	if err != nil {
 		log.Println("Error creating HTTP request:", err)
-		return MonitoringHostStatus{Error: true, Message: err.Error()}
+		return TopologyPropagationResponse{State: "error", Error: err.Error()}
 	}
 	req.Header.Set("Content-Type", jgf.MIME_TYPE)
 
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Println("propagation:", err)
-		return MonitoringHostStatus{Error: true, Message: err.Error()}
+		return TopologyPropagationResponse{State: "error", Error: err.Error()}
 	}
 	log.Printf("propagation: POST %s status=%s", url, resp.Status)
 
@@ -242,22 +242,22 @@ func monitoring_quiescent_propagate_one(url string, body io.ReadSeeker) (status 
 	if err != nil {
 		log.Printf("propagation: Error reading HTTP response for %s: %v",
 			resp.Request.URL.String(), err)
-		return MonitoringHostStatus{Error: true, Message: err.Error()}
+		return TopologyPropagationResponse{State: "error", Error: err.Error()}
 	}
 
 	if resp.StatusCode != 202 {
 		errstr := fmt.Sprintf("Host returned HTTP status %s - %s",
 			resp.Status, res)
-		return MonitoringHostStatus{Error: true, Message: errstr}
+		return TopologyPropagationResponse{State: "error", Error: errstr}
 	}
 
-	return MonitoringHostStatus{Error: false, Message: ""}
+	return TopologyPropagationResponse{State: "ok", Error: ""}
 }
 
 // monitoring_quiescent_propagate forwards the information received from
 // DPT/configuration utility to all other machines as the new quiescent state
-func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode string) (bool, map[string]MonitoringHostStatus) {
-	results := make(map[string]MonitoringHostStatus, len(g.Nodes)-1)
+func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode string) (bool, map[string]TopologyPropagationResponse) {
+	results := make(map[string]TopologyPropagationResponse, len(g.Nodes)-1)
 	errors  := false
 
 	log.Println("Propagating new topology...")
@@ -292,7 +292,7 @@ func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode st
 			results_mutex.Lock()
 			results[host] = status
 			results_mutex.Unlock()
-			if status.Error {
+			if status.Error != "" {
 				errors = true
 			}
 		}(host, url, body)
@@ -441,30 +441,34 @@ func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 	log.Println(bold("Topology definition succeeded!"))
 	if !propagate {
 		w.WriteHeader(http.StatusAccepted)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{}"))
 		return
 	}
 
 	// Attempt propgagation, returning errors to client
 	ok, errs := monitoring_quiescent_propagate(g, bytes.NewReader(body), hashcode)
-	var response []byte
-	if !ok {
-		response, err = json.Marshal(errs)
-		if err != nil {
-			statuscode = http.StatusInternalServerError
-			msg = "Error marshaling JSON"
-			log.Println(msg)
-			http.Error(w, msg, statuscode)
-			return
-		}
-		statuscode = http.StatusFailedDependency
-		msg = "Propagation error"
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(statuscode)
-		w.Write(response)
+
+	response, err := json.Marshal(errs)
+	if err != nil {
+		statuscode = http.StatusInternalServerError
+		msg = "Error marshaling JSON"
+		log.Println(msg)
+		http.Error(w, msg, statuscode)
 		return
 	}
-	log.Println("Propagation finished!")
-	w.WriteHeader(http.StatusAccepted)
+
+	if ok {
+		log.Println("Propagation finished!")
+		statuscode = http.StatusAccepted
+	} else {
+		log.Println("Propagation error!")
+		statuscode = http.StatusFailedDependency
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statuscode)
+	w.Write(response)
+	return
 }
 
 // The response JSON for /topology/status
@@ -545,8 +549,14 @@ func handle_topology_status(w http.ResponseWriter, req *http.Request) {
 	w.Write(response)
 }
 
-// Maps primary MgmtIP to TopologyScanResponse
-type TopologyScanResponse map[string]*TopologyStatusResponse
+type TopologyScanResponseMember struct {
+	State          string                    `json:"state"`
+	Error          string                    `json:"error,omitempty"`
+	Response      *TopologyStatusResponse    `json:"response,omitempty"`
+}
+
+// Maps primary MgmtIP to TopologyScanResponseMember
+type TopologyScanResponse map[string]TopologyScanResponseMember
 
 func request_topology_status(ip string) (tsr TopologyStatusResponse, err error) {
 	client  := http.Client{Timeout: ARGV.http_timeout}
@@ -584,17 +594,37 @@ func handle_topology_scan(w http.ResponseWriter, req *http.Request) {
 	}
 
 	res := make(TopologyScanResponse, len(g.Nodes))
+
+	var wg sync.WaitGroup
+	var res_mutex = &sync.RWMutex{}
+
 	for _, v := range g.Nodes {
 		ip := v.Label
-		r, err := request_topology_status(ip)
-		if err != nil {
-			log.Println(err)
-			/* TODO not specified in API response document */
-			res[ip] = nil // "Failed to request topology status from host"
-			continue
-		}
-		res[ip] = &r
+
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+
+			r, err := request_topology_status(ip)
+
+			res_mutex.Lock()
+			if err != nil {
+				log.Printf("Error requesting topology status from node (%s): %s",
+					ip, err)
+				res[ip] = TopologyScanResponseMember{
+					State: "error",
+					Error: err.Error(),
+				}
+			} else {
+				res[ip] = TopologyScanResponseMember{
+					State: "ok",
+					Response: &r,
+				}
+			}
+			res_mutex.Unlock()
+		}(ip)
 	}
+	wg.Wait()
 
 	buf, err := json.Marshal(res)
 	if err != nil {
@@ -622,8 +652,8 @@ func monitoring_tick() {
 // reads in the neighbor database
 func monitoring_init() {
     http_handlers [_quiescent_api_path] = handle_topology_quiescent
-	http_handlers [_status_api_path] = handle_topology_status
-	http_handlers [_scan_api_path] = handle_topology_scan
+	http_handlers [_status_api_path]    = handle_topology_status
+	http_handlers [_scan_api_path]      = handle_topology_scan
 
 	var err error
 	NDB, err = read_neighbor_db_file()

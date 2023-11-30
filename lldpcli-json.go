@@ -244,7 +244,9 @@ func (t *IdentifierType) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Contains the same information as LldpcliNeighborInfo but sensibly flattened
+// struct Neighbor contains the same information as LldpcliNeighborInfo but
+// sensibly flattened, as well as STP information queried separately from
+// topologyd
 type Neighbor struct {
 	Identifier         string            `json:"Identifier"`      // Unique identifier used by this machine (typically MAC address)
 	IdType             IdentifierType    `json:"IdentifierType"`  // Type of Identifier field (MAC, LOCAL, UNKNOWN)
