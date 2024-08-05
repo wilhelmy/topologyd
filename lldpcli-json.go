@@ -49,10 +49,11 @@ type LldpcliChassisMember struct {
 	// this is sometimes an array, sometimes a string... declare as interface{}
 	// and fix further down
 	MgmtIP     interface{}       `json:"mgmt-ip,omitempty"`
-	Capability []struct {
+	Capability json.RawMessage   `json:"capability,omitempty"`
+	/* FIXME Once again, Capability can be slice of struct, or just struct {
 		Type    string           `json:"type,omitempty"`
 		Enabled bool             `json:"enabled,omitempty"`
-	}                            `json:"capability,omitempty"`
+	}. Since it's currently unused, I don't want to bother parsing it right now */
 }
 
 // lldpcli JSON for any chassis consists of an object keyed by the system
@@ -214,16 +215,18 @@ const (
 	UNKNOWN_ID IdentifierType = iota
 	MAC_ID
 	LOCAL_ID
+	IFNAME_ID
 )
 
 var _id_map = map[string]IdentifierType{
 	"mac":     MAC_ID,
 	"local":   LOCAL_ID,
+	"ifname":  IFNAME_ID,
 	"unknown": UNKNOWN_ID,
 }
 
 func (t IdentifierType) String() string {
-	return []string{"unknown", "mac", "local"}[t]
+	return []string{"unknown", "mac", "ifname", "local"}[t]
 }
 
 func (t IdentifierType) MarshalJSON() ([]byte, error) {
