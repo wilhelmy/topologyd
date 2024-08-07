@@ -2,18 +2,21 @@
 package main
 
 import (
-    "bytes"
-    "flag"
-    "fmt"
-    "io/ioutil"
-    "log"
-    "net"
-    "net/url"
-    "net/http"
-    "strings"
-    "time"
-    "jgf"
-    "sort"
+	"bytes"
+	"errors"
+	"flag"
+	"fmt"
+	"io/ioutil"
+	"jgf"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
 )
 
 /**** Commandline arguments section ***************************************************/
@@ -52,6 +55,10 @@ var ARGV struct {
 
     // Whether or not to print the neighbors as they are gathered
     gather_verbose        bool
+
+    // whether or not to gather node neighbors via snmp if the node doesn't
+    // respond to a topologyd API request
+    gather_snmp           bool
 
     // directory where data is stored
     data_dir              string
@@ -167,6 +174,15 @@ func handle_stp_request(w http.ResponseWriter, req *http.Request) {
     }
 }
 
+// Given an IPv6 address, returns the same IPv6 address with %zone attached if
+// required
+func fix_linklocal(host string) string {
+    if ip := net.ParseIP(host); ip.IsLinkLocalUnicast() {
+        return ip.String() + "%" + ARGV.netif_link_local_ipv6
+    }
+    return host
+}
+
 // http_make_url turns a host and path into a full URL by adding IPv6LL zone and
 // port number, and wrapping IPv6 addresses in angle brackets
 func http_make_url(host string, path string) (url string) {
@@ -197,10 +213,10 @@ func http_url_attach_query_string(uri string, key string, value string) string {
 // Send HTTP GET requests to specified node, logs errors and discards malformed
 // responses to keep the rest of the logic clean - expects JSON response from
 // Server
-func http_get(host string, path string) []byte {
+func http_get(host string, path string) (body []byte, err error) {
     if host == "" {
         log.Printf("http_get called with empty host")
-        return []byte{}
+        return []byte{}, nil
     }
     url := http_make_url(host, path)
     client := http.Client{
@@ -209,7 +225,7 @@ func http_get(host string, path string) []byte {
     resp, err := client.Get(url) // send request
     if err != nil {
         log.Printf("Error querying %s: %s\n", url, err)
-        return nil
+        return nil, err
     } else if dbg_http_query_verbose {
         log.Printf("HTTP response for GET %s: %v\n", url, resp)
     }
@@ -218,24 +234,24 @@ func http_get(host string, path string) []byte {
     if resp.StatusCode != http.StatusOK {
         log.Printf("HTTP GET %s returned code %d %s: %v\n",
             url, resp.StatusCode, resp.Status, resp)
-        return nil
+        return nil, fmt.Errorf("invalid HTTP response")
     }
 
     contentType := resp.Header.Get("Content-type")
     if contentType != "application/json" {
         log.Printf("HTTP GET %s did not return JSON: %v\n", url, resp)
-        return nil
+        return nil, fmt.Errorf("JSON expected")
     }
 
     // read response body
-    body, err := ioutil.ReadAll(resp.Body)
+    body, err = ioutil.ReadAll(resp.Body)
     if err != nil {
         log.Printf("Error reading response body for GET %s: %s\n", url, err)
-        return nil
+        return
     } else if dbg_http_query_verbose {
         log.Printf("Body: %s\n", body)
     }
-    return body
+    return
 }
 
 /**** LLDP-HTTP interface *************************************************************/
@@ -246,15 +262,33 @@ func http_get_node_neighbor_info(host string) (NeighborSlice, error) {
         return nil, fmt.Errorf("http_get_node_neighbor_info called on empty string")
     }
 
-    data := http_get(host, lldp_neighbor_path)
-    if data == nil {
-        return nil, fmt.Errorf("HTTP GET %s on '%s' failed", lldp_neighbor_path, host)
-    }
+    var neighbors NeighborSlice
 
-    // parse result as JSON
-    neighbors, err := parse_lldpcli_neighbors_output(host, data)
-    if err != nil {
-        log.Print(err)
+    data, err := http_get(host, lldp_neighbor_path)
+    // XXX will make an attempt to contact the node via SNMP iff the connection
+    // on the topologyd port was refused or the HTTP connection times out.
+    // This is a somewhat dirty heuristic.
+    if ARGV.gather_snmp &&
+        (errors.Is(err, syscall.ECONNREFUSED) || os.IsTimeout(err)) {
+
+        log.Println("No topologyd found, trying SNMP...")
+        neighbors, err = snmp_lookup_neighbors(fix_linklocal(host))
+        for i := range neighbors {
+            neighbors[i].Origin = ORIGIN_SNMP
+        }
+    } else if data == nil {
+        return nil, fmt.Errorf("HTTP GET %s on '%s' failed", lldp_neighbor_path, host)
+    } else {
+        // parse result as JSON
+        neighbors, err = parse_lldpcli_neighbors_output(host, data)
+        if err != nil {
+            log.Print(err)
+        }
+
+        // since this neighbor came from another topologyd, set its origin
+        for i := range neighbors {
+            neighbors[i].Origin = ORIGIN_TOPOLOGYD
+        }
     }
 
     return neighbors, err
@@ -263,7 +297,7 @@ func http_get_node_neighbor_info(host string) (NeighborSlice, error) {
 // HTTP GET on the chassis URL for a given host, pull MgmtIP out of the chassis
 // data which was returned
 func http_get_host_mgmt_ip(host string) (ret string) {
-    data := http_get(host, lldp_chassis_path)
+    data, _ := http_get(host, lldp_chassis_path)
     if data == nil { return }
 
     chassis, err := lldp_parse_chassis_data(data)
@@ -281,7 +315,7 @@ func http_get_host_mgmt_ip(host string) (ret string) {
 
 // Queries STP port state from host
 func http_get_node_stp_port_state(host string) (ret PortToStateMap) {
-    data := http_get(host, stp_port_state_path)
+    data, _ := http_get(host, stp_port_state_path)
     if data == nil { return nil }
 
     ret = STP_parse_port_state_json(data)
@@ -318,7 +352,8 @@ func log_gather(format string, arg... interface{}) {
     }
 }
 
-// Send HTTP GET requests to obtain neighbors from hosts and handle errors
+// Send HTTP GET or SNMP requests to obtain neighbors from hosts and handle
+// errors
 func get_node_neighbors(ip string) (ret NeighborSlice) {
     ret, err := http_get_node_neighbor_info(ip)
     if err != nil {
@@ -362,8 +397,8 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
                 continue
             }
 
-            // the hashtable is dual-use to prevent duplicating previously
-            // looked-up todo list entries
+            // the hashtable is dual-use to prevent duplicating lookups to
+            // previously looked-up todo list entries
             if _, found := neighbors[newip]; !found {
                 // initialize hashtable location to nil for deduplication
                 neighbors[newip] = nil
@@ -470,14 +505,22 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
         meta := jgf_node_get_metadata(&node)
         id := meta.Identifier
         if id == "" {id = "undefined"}
-        text := fmt.Sprintf("\t\"%s\" [shape=box,label=\""+
+        var color = "black"
+        if meta.Origin == ORIGIN_TOPOLOGYD {
+            color = "gray"
+        }
+        text := fmt.Sprintf("\t\"%s\" [shape=box,color=\"%s\",label=\""+
             "Hostname: %s\\n"+
             "%s identifier: %s\\n"+
             "IP: %s\"]",
+            //TODO escape strings
             node.Label,
+            color,
             meta.Hostname,
             strings.ToUpper(meta.IdType.String()), id,
-            node.Label)
+            node.Label,
+
+        )
         lines[i] = text
     }
     // sort output to make it look predictably
@@ -540,6 +583,7 @@ func main() {
     flag.BoolVar(     &ARGV.prefer_ipv6,       "prefer-ipv6",           true, "prefer IPv6 addresses reported by LLDP (otherwise, use the first one found)")
     flag.BoolVar(     &ARGV.query_stp_state,   "query-stp-state",       true, "enable querying STP state")
     flag.BoolVar(     &ARGV.gather_verbose,    "gather-verbose",        true, "whether or not to print neighbors as they are gathered")
+    flag.BoolVar(     &ARGV.gather_snmp,     "gather-snmp",              true, "whether or not to gather node neighbors via snmp if the node doesn't respond to a topologyd API request")
     flag.StringVar(   &ARGV.host_prefix,    "host-prefix",          "dc3500", "hostnames that don't start with this string generate a warning if found (set to '' to disable)")
     flag.StringVar(   &ARGV.data_dir,       "data-dir",     "/var/topologyd", "directory name where files are stored")
     flag.DurationVar( &ARGV.monitoring_freq,"monitoring-freq", 2*time.Minute, "frequency of topology change monitoring (0 disables)")
@@ -550,6 +594,7 @@ func main() {
     }
 
     monitoring_init()
+    snmp_init()
 
     // initialize http handlers
     for path, handler := range http_handlers {

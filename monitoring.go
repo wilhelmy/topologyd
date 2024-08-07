@@ -210,7 +210,7 @@ func monitoring_jgf_valid(g jgf.Graph) (error) {
 
 // Contains the propagation response state as well as optionally an error
 type TopologyPropagationResponse struct {
-    State       string    `json:"state"`
+	State       string    `json:"state"`
 	Error       string    `json:"error,omitempty"`
 }
 

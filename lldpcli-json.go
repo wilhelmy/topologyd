@@ -259,7 +259,16 @@ type Neighbor struct {
 	SourceNeighbor     string            `json:"SourceNeighbor"`  // Primary MgmtIP address of neighbor which found this neighbor via LLDP
 	MgmtIPs          []string            `json:"MgmtIPs"`         // Management IPs of this neighbor reported by LLDP
 	PortState          PortToStateMap    `json:"STPPortState"`    // STP port state as reported by this neighbor
+	Origin             OriginType        `json:"Origin"`          // Whether this neighbor was
 }
+
+// OriginType is an enum for the different types of lookup that can result in a Neighbor
+type OriginType int
+const (
+	ORIGIN_LOCAL      OriginType = iota   // host found in local lldpcli json output
+	ORIGIN_TOPOLOGYD                      // found by topologyd API lookup
+	ORIGIN_SNMP                           // found by SNMP lookup
+)
 
 // For the local chassis, the data is almost the same, except SourceIface and
 // potentially some other fields are unset.  Create a cheap type alias to make
@@ -452,6 +461,7 @@ func get_local_chassis_mgmt_ips() (mgmtIPs MgmtIPs, err error) {
 // the set of missing peers
 func (neighbors NeighborSlice) Compare(peers NeighborSlice) (r TopologyStatusResponse) {
 	// TODO this function isn't optimized for efficiency. Seems like O(n^2)
+	// TODO refactor: use golang-set/mapset module (not part of the standard lib)
 	seen := make(map[string]bool, len(neighbors))
 
 	// Step 1: set all IPs from neighbors to false in the map
@@ -579,7 +589,7 @@ func compare_neighbors(n *Neighbor, p *Neighbor) (bool, []Reason) {
 	ip, err := get_suitable_mgmt_ip(n.MgmtIPs)
 	if err != nil {
 		msg := fmt.Sprintf("Internal error: failed to get MgmtIP from node %v",
-			n.MgmtIPs)
+			n)
 		log.Println(msg)
 		return false, []Reason{ Reason{Message: msg} }
 	}
