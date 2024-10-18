@@ -2,7 +2,7 @@
 #+TODO: TODO(t) PROJ(p) LOOP(r) STRT(s) WAIT(w) HOLD(h) IDEA(i) | DONE(d) KILL(k) "[ ]"(T) [-](S) [?](W) | [X](D) | OKAY(o) YES(y) NO(n)
 
 * TODO Authentication
-We probably will just use IPSec because we need/want it elsewhere anyway
+We probably will just use IPSec/MACsec because we need/want it elsewhere anyway
 * DONE Is a simple HTTP REST service otherwise sufficient as a wire protocol?
 It probably is, but it might also make sense to think about it and use the same
 protocol as the rest of the stack, such as ZeroMQ/protobuf, should we decide to
@@ -15,12 +15,33 @@ Seems like pointless overkill that doesn't add much value
 #+end_example
 ** Reduced default HTTP timeout to 2s
 * TODO Add retries to HTTP GET?
-* IDEA Parallelize GET requests with goroutines?
-* TODO Handle "500 internal server error" if lldpcli can't be executed on the machine
-#+begin_src shell :results output
+SNMP has retries, but it also works via UDP whereas HTTP over TCP should already
+ensure connection stability. However, if a node running topologyd can't be
+reached, and it isn't a temporary failure and works again in the next attempt to
+fetch from that node, that's a decent enough sign of a network failure..
+Especially the monitoring code should probably add retries and report failed
+requests to the part of the system displaying failure alarms.
+
+So the solution should probably be to add a couple of quick HTTP retries and
+define some failure conditions (such as, after how many seconds of the machine
+not reappearing because of a spurious reboot or something similar, should a
+failure condition be reported?)
+* PROJ Parallelize GET requests with goroutines?
+** HTTP GET requests, while not particularly slow, have gotten a sibling now, SNMP BulkWalk requests.
+
+SNMP responses can take forever (e.g. 20 seconds per switch if the switch
+responds slowly), even for small amounts of data like querying LLDP neighbors.
+
+Therefore these requests should be parallelized for all members of the todo list
+in [[file:topologyd.go::func gather_neighbors_from_nodes]] as soon as its main loop
+loops
+* WAIT Handle "500 internal server error" if lldpcli can't be executed on the machine?
+#+NAME: HTTP request for `lldpcli show chassis` code
+#+begin_src shell :results output :exports both :eval never-export
 curl -v localhost:9090/lldp/chassis 2>&1 | tr -d \\r
 #+end_src
 
+#+NAME: HTTP request for `lldpcli show chassis` results
 #+RESULTS:
 #+begin_example
 ,*   Trying 127.0.0.1:9090...
@@ -167,6 +188,7 @@ exit status 2
 
 #+end_example
 * TODO Add testsuite
+Some level of automated testing should help detecting random breakage
 * TODO What about the case when no lldp neighbors are found?
 Is the JSON output still parseable? -> No, but it does not raise an error.
 
@@ -213,3 +235,94 @@ I haven't seen this in a long time. Verify during testing stage if it still occu
 Jan 30 12:21:47 dc3500 topologyd[480]: 2023/01/30 12:21:47 lldpcli-json.go:148: MgmtIP[]: No IP address found for chassis {ID:{Type:mac Value:b6:fe:ef:00:00:22} Descr:DET Wayland dunfell-7.0 -27-g4846420 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64 MgmtIP:[] Capability:[{Type:Bridge Enabled:true} {Type:Router Enabled:false} {Type:Wlan Enabled:false} {Type:Station Enabled:false}]} (all empty?)
 Jan 30 12:21:49 dc3500 topologyd[480]: 2023/01/30 12:21:49 topologyd.go:261: == Begin gathering neighbors ==
 #+end_example
+* TODO check out collectd for more generic network monitoring
+Such as ping probes, or reporting topologyd information as a metric. Alex might be interested in looking into it too.
+* PROJ SNMP neighbor support
+This list is unordered and currently work in progress. It is related to the refactoring of the datastructures so
+STP and other node data is kept in a more sensible place outside of the neighbors table.
+** [-] Why are the links between nodes purple?
+Both nodes received via SNMP as well as topologyd/HTTP return unknown STP link
+states now. The HTTP links were fine before I started refactoring, the SNMP
+links don't work right so far.
+** [ ] Why does an SNMP lookup return 8 nodes?
+This is fishy, especially since some of these structs are only half populated
+#+begin_example
+2024/09/05 22:53:26 topologyd.go:374: Processing #5 (host fe80::260:a7ff:fe0d:989b), todo list: [fe80::5886:c9ff:feff:a588]
+2024/09/05 22:53:26 topologyd.go:230: Error querying http://[fe80::260:a7ff:fe0d:989b%25eno1]:9090/lldp/neighbors: Get "http://[fe80::260:a7ff:fe0d:989b%25eno1]:9090/lldp/neighbors": dial tcp [fe80::260:a7ff:fe0d:989b%eno1]:9090: connect: connection refused
+2024/09/05 22:53:26 topologyd.go:389: No topologyd found, trying SNMP...
+2024/09/05 22:53:26 snmp.go:228: => Entering SNMP
+2024/09/05 22:53:28 snmp.go:170: Eeep! SNMP Neighbor reported strange Port ID type: 0
+2024/09/05 22:53:28 snmp.go:170: Eeep! SNMP Neighbor reported strange Port ID type: 0
+2024/09/05 22:53:28 snmp.go:170: Eeep! SNMP Neighbor reported strange Port ID type: 0
+2024/09/05 22:53:28 snmp.go:170: Eeep! SNMP Neighbor reported strange Port ID type: 0
+2024/09/05 22:53:28 snmp.go:170: Eeep! SNMP Neighbor reported strange Port ID type: 0
+2024/09/05 22:53:28 snmp.go:170: Eeep! SNMP Neighbor reported strange Port ID type: 0
+2024/09/05 22:53:32 snmp.go:279: XXX debug {ns:[{Identifier: IdType:0 Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2} {Identifier: IdType:0 Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2} {Identifier: IdType:0 Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[fe80::5886:c9ff:feff:a588] Origin:2} {Identifier: IdType:0 Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[fe80::5073:dfff:fe4e:8f9] Origin:2} {Identifier: IdType:0 Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2} {Identifier: IdType:0 Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2} {Identifier:b6:fe:ef:00:00:28 IdType:1 Descr:DET Wayland dunfell-7.0-29-g08713e0 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64 Hostname:dc3500 SourceIface:00:07:8e:ff:ea:1b SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2} {Identifier:b6:fe:ef:00:00:29 IdType:1 Descr:DET Wayland dunfell-7.0-29-g08713e0 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64 Hostname:dc3500 SourceIface:b6:fe:ef:00:00:29 SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2}] origin:2 host:fe80::260:a7ff:fe0d:989b stp:map[]}
+2024/09/05 22:53:32 snmp.go:230: <= Leaving SNMP
+2024/09/05 22:53:32 topologyd.go:374: Neighbor (1/8): {Identifier: IdType:unknown Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2}
+2024/09/05 22:53:32 topologyd.go:429: gather: machine fe80::260:a7ff:fe0d:989b: failed to get management IP: no IP address found for Neighbor (is it defined?)
+2024/09/05 22:53:32 topologyd.go:374: Neighbor (2/8): {Identifier: IdType:unknown Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2}
+2024/09/05 22:53:32 topologyd.go:429: gather: machine fe80::260:a7ff:fe0d:989b: failed to get management IP: no IP address found for Neighbor (is it defined?)
+2024/09/05 22:53:32 topologyd.go:374: Neighbor (3/8): {Identifier: IdType:unknown Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[fe80::5886:c9ff:feff:a588] Origin:2}
+2024/09/05 22:53:32 topologyd.go:374: Neighbor (4/8): {Identifier: IdType:unknown Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[fe80::5073:dfff:fe4e:8f9] Origin:2}
+2024/09/05 22:53:32 topologyd.go:374: Neighbor (5/8): {Identifier: IdType:unknown Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2}
+2024/09/05 22:53:32 topologyd.go:429: gather: machine fe80::260:a7ff:fe0d:989b: failed to get management IP: no IP address found for Neighbor (is it defined?)
+2024/09/05 22:53:32 topologyd.go:374: Neighbor (6/8): {Identifier: IdType:unknown Descr: Hostname: SourceIface: SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2}
+2024/09/05 22:53:32 topologyd.go:429: gather: machine fe80::260:a7ff:fe0d:989b: failed to get management IP: no IP address found for Neighbor (is it defined?)
+2024/09/05 22:53:32 topologyd.go:374: Neighbor (7/8): {Identifier:b6:fe:ef:00:00:28 IdType:mac Descr:DET Wayland dunfell-7.0-29-g08713e0 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64 Hostname:dc3500 SourceIface:00:07:8e:ff:ea:1b SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2}
+2024/09/05 22:53:32 topologyd.go:429: gather: machine fe80::260:a7ff:fe0d:989b: failed to get management IP: no IP address found for Neighbor (is it defined?)
+2024/09/05 22:53:32 topologyd.go:374: Neighbor (8/8): {Identifier:b6:fe:ef:00:00:29 IdType:mac Descr:DET Wayland dunfell-7.0-29-g08713e0 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64 Hostname:dc3500 SourceIface:b6:fe:ef:00:00:29 SourceNeighbor:fe80::260:a7ff:fe0d:989b MgmtIPs:[] Origin:2}
+2024/09/05 22:53:32 topologyd.go:429: gather: machine fe80::260:a7ff:fe0d:989b: failed to get management IP: no IP address found for Neighbor (is it defined?)
+#+end_example
+** [ ] Why do nodes received via SNMP not report their SourceInterface
+The node labeled origin=2 was received via SNMP
+Not sure what's up with the duplicate nodes with the same prefix, maybe my desktop machine reports more than one MgmtIP via lldpd? I also need to check this out.
+#+begin_example
+strict graph {
+	"fd52:e54d:2bb4::1" [shape=box,color="black",label="Hostname:  (origin=0)\nUNKNOWN identifier: undefined\nIP: fd52:e54d:2bb4::1"]
+	"fd52:e54d:2bb4::198" [shape=box,color="gray",label="Hostname: greifswald (origin=1)\nMAC identifier: 18:03:73:db:3a:a8\nIP: fd52:e54d:2bb4::198"]
+	"fe80::260:a7ff:fe0d:989b" [shape=box,color="gray",label="Hostname: nonsens (origin=1)\nMAC identifier: 00:60:a7:0d:98:9b\nIP: fe80::260:a7ff:fe0d:989b"]
+	"fe80::5073:dfff:fe4e:8f9" [shape=box,color="black",label="Hostname:  (origin=2)\nUNKNOWN identifier: undefined\nIP: fe80::5073:dfff:fe4e:8f9"]
+	"fe80::5886:c9ff:feff:a588" [shape=box,color="gray",label="Hostname: dc3500 (origin=1)\nMAC identifier: b6:fe:ef:00:00:28\nIP: fe80::5886:c9ff:feff:a588"]
+	"fe80::6c33:c1ff:fef2:b96" [shape=box,color="gray",label="Hostname: dc3500 (origin=1)\nMAC identifier: b6:fe:ef:00:00:27\nIP: fe80::6c33:c1ff:fef2:b96"]
+	"fd52:e54d:2bb4::198" -- "fd52:e54d:2bb4::1" [color="purple",taillabel="eno1",headlabel="UNDEFINED"]
+	"fd52:e54d:2bb4::198" -- "fe80::5073:dfff:fe4e:8f9" [color="purple",taillabel="eno1",headlabel="en1"]
+	"fd52:e54d:2bb4::198" -- "fe80::6c33:c1ff:fef2:b96" [color="purple",taillabel="eno1",headlabel="en1"]
+	"fe80::260:a7ff:fe0d:989b" -- "fe80::5073:dfff:fe4e:8f9" [color="purple",taillabel="",headlabel="en0"]
+	"fe80::5073:dfff:fe4e:8f9" -- "fd52:e54d:2bb4::1" [color="purple",taillabel="en1",headlabel="UNDEFINED"]
+	"fe80::5886:c9ff:feff:a588" -- "fe80::260:a7ff:fe0d:989b" [color="purple",taillabel="en1",headlabel=""]
+	"fe80::5886:c9ff:feff:a588" -- "fe80::6c33:c1ff:fef2:b96" [color="purple",taillabel="en0",headlabel="en0"]
+	"fe80::6c33:c1ff:fef2:b96" -- "fd52:e54d:2bb4::1" [color="purple",taillabel="en1",headlabel="UNDEFINED"]
+	"fe80::6c33:c1ff:fef2:b96" -- "fe80::5073:dfff:fe4e:8f9" [color="purple",taillabel="en1",headlabel="en1"]
+}
+#+end_example
+
+** [ ] Investigate node with empty/unknown information
+
+#+begin_src graphviz
+strict graph {
+  "fd52:e54d:2bb4::1" [shape=box,color="black",label="Hostname:  (origin=0)\nUNKNOWN identifier: undefined\nIP: d52:e54d:2bb4::1"]
+  # ... more nodes
+}
+#+end_src
+** [ ] SNMP lookups seem to report the neighbor SourceIface rather than theirs
+Investigate that code
+* WAIT detect unmanaged switches
+Unmanaged switches do not normally have an IP address or MAC address assigned on
+their interface that they expose via LLDP (although some do have LLDP or CDP
+apparently, which lldpd supports).
+
+If several neighbor nodes are present on the same network interface, this means
+that most likely there's an invisible unmanaged switch there.
+
+As a solution, neighbor nodes which are seen on the same network interface
+should be grouped together into some yet-to-be-invented data structure
+representing this unmanaged switch.
+
+This switch also needs to be presented via the JGF API somehow.
+
+However since we're currently only planning to use managed switches, this is out
+of scope for now.
+* TODO Make the log messages less spammy
+Add a debug mode for more targeted log messages while at it
+This is mostly important for deployment, so leave it mostly as is for now.

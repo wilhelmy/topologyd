@@ -258,16 +258,16 @@ type Neighbor struct {
 	SourceIface        string            `json:"SourceInterface"` // Interface name on which this neighbor was found by the neighbor reporting it
 	SourceNeighbor     string            `json:"SourceNeighbor"`  // Primary MgmtIP address of neighbor which found this neighbor via LLDP
 	MgmtIPs          []string            `json:"MgmtIPs"`         // Management IPs of this neighbor reported by LLDP
-	PortState          PortToStateMap    `json:"STPPortState"`    // STP port state as reported by this neighbor
-	Origin             OriginType        `json:"Origin"`          // Whether this neighbor was
+	Origin             OriginType        `json:"Origin"`          // Whether this neighbor was obtained via topologyd's http API or SNMP
 }
 
 // OriginType is an enum for the different types of lookup that can result in a Neighbor
 type OriginType int
 const (
-	ORIGIN_LOCAL      OriginType = iota   // host found in local lldpcli json output
-	ORIGIN_TOPOLOGYD                      // found by topologyd API lookup
-	ORIGIN_SNMP                           // found by SNMP lookup
+	ORIGIN_LOCAL      OriginType = iota                           // host found in local lldpcli json output
+	ORIGIN_TOPOLOGYD                                              // found by topologyd API lookup
+	ORIGIN_SNMP                                                   // found by SNMP lookup
+	ORIGIN_ICMP                                                   // node responded to broadcast ping
 )
 
 // For the local chassis, the data is almost the same, except SourceIface and
@@ -277,6 +277,16 @@ type LocalChassis Neighbor
 
 // Declare a type alias to define methods on it later
 type NeighborSlice []Neighbor
+
+// Dedicated type for storing the associated result of a lookup
+type NeighborLookupResult struct {
+	ns		          NeighborSlice                              // list of neighbors received from this host
+	origin            OriginType                                 // whether this node communicated via SNMP or topologyd
+	ip                string                                     // IP address this was received from
+	mac               string                                     // MAC address of this host
+	stp               PortToStateMap    `json:"STPPortState"`    // STP port state as reported by this neighbor
+	snmp              PortDataMap                                // Network port table of this host received via SNMP
+}
 
 // There should only ever be one element in this map, and not all data is
 // actually used, so it gets flattened to our saner Neighbor type here
@@ -307,6 +317,7 @@ func lldpcli_neighbor_interface_map_to_neighbor(host string, ifmap LldpcliNeighb
 			IdType:         chassis.get_idtype(),
 			Descr:          chassis.Descr,
 			MgmtIPs:        chassis.MgmtIP.([]string),
+			Origin: 3232,
 		// FIXME include neighborIface.Port (i.e. the remote port) in the data
 		// structure if desirable later
 		}
@@ -402,14 +413,6 @@ func (ns *NeighborSlice) get_mgmt_ips() (res []string) {
 		res[i] = mgmt_ip
 	}
 	return
-}
-
-// Retrieves STP information for all neighbors in the slice
-func (ns *NeighborSlice) gather_stp_states() {
-    for i, n := range *ns {
-        n.gather_node_stp_state()
-        (*ns)[i] = n
-    }
 }
 
 // Given a primary MgmtIP address, return the Neighbor

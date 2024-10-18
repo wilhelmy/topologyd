@@ -56,6 +56,9 @@ var ARGV struct {
     // Whether or not to print the neighbors as they are gathered
     gather_verbose        bool
 
+    // Whether or not to print snmp lookups verbosely
+    snmp_verbose          bool
+
     // whether or not to gather node neighbors via snmp if the node doesn't
     // respond to a topologyd API request
     gather_snmp           bool
@@ -94,7 +97,7 @@ func init() {
 // chassis or neighbor info
 func handle_lldp_request(w http.ResponseWriter, req *http.Request) {
     log.Printf("Received HTTP GET from %s for %s", req.RemoteAddr, req.URL.Path)
-    reqName := req.URL.Path[6:] // cut leading /lldp/
+    reqName := strings.TrimPrefix(req.URL.Path, "/lldp/")
     switch reqName {
     case "neighbors", "chassis":
         break
@@ -256,28 +259,19 @@ func http_get(host string, path string) (body []byte, err error) {
 
 /**** LLDP-HTTP interface *************************************************************/
 // HTTP GET request wrapper for the LLDP neighbors URL. Returns the parsed JSON
-// as a slice of struct Neighbor.
-func http_get_node_neighbor_info(host string) (NeighborSlice, error) {
+// as a slice of struct Neighbor wrapped in struct NeighborLookupResult.
+func http_get_node_neighbor_info(host string) (res NeighborLookupResult, err error) {
     if host == "" {
-        return nil, fmt.Errorf("http_get_node_neighbor_info called on empty string")
+        err = fmt.Errorf("http_get_node_neighbor_info called on empty string")
+        return
     }
+    data, err := http_get(host, lldp_neighbor_path)
 
     var neighbors NeighborSlice
 
-    data, err := http_get(host, lldp_neighbor_path)
-    // XXX will make an attempt to contact the node via SNMP iff the connection
-    // on the topologyd port was refused or the HTTP connection times out.
-    // This is a somewhat dirty heuristic.
-    if ARGV.gather_snmp &&
-        (errors.Is(err, syscall.ECONNREFUSED) || os.IsTimeout(err)) {
-
-        log.Println("No topologyd found, trying SNMP...")
-        neighbors, err = snmp_lookup_neighbors(fix_linklocal(host))
-        for i := range neighbors {
-            neighbors[i].Origin = ORIGIN_SNMP
-        }
-    } else if data == nil {
-        return nil, fmt.Errorf("HTTP GET %s on '%s' failed", lldp_neighbor_path, host)
+    if data == nil {
+        err = fmt.Errorf("HTTP GET %s on '%s' failed: %w", lldp_neighbor_path, host, err)
+        return
     } else {
         // parse result as JSON
         neighbors, err = parse_lldpcli_neighbors_output(host, data)
@@ -286,12 +280,20 @@ func http_get_node_neighbor_info(host string) (NeighborSlice, error) {
         }
 
         // since this neighbor came from another topologyd, set its origin
+        // because sometimes Neighbor{}s are passed around rather than
+        // NeighborLookupResult{}s
         for i := range neighbors {
             neighbors[i].Origin = ORIGIN_TOPOLOGYD
         }
     }
 
-    return neighbors, err
+    res = NeighborLookupResult{
+        ns:     neighbors,
+        origin: ORIGIN_TOPOLOGYD,  // also set its origin here on the response level
+        ip:     host,
+        // TODO add chassis data here
+    }
+    return res, err
 }
 
 // HTTP GET on the chassis URL for a given host, pull MgmtIP out of the chassis
@@ -327,23 +329,38 @@ func bold(x string) string {
     return "\033[1;1m" + x + "\033[0;0m"
 }
 
-// Send HTTP GET request to obtain STP state from neighbor
-func (n *Neighbor) gather_node_stp_state() (err error) {
-    if (*n).PortState != nil {
-        return fmt.Errorf("neighbor link state is already populated: %v", *n)
+
+// Send HTTP GET request to obtain STP state from neighbor, or SNMP request if
+// the neighbor was obtained through SNMP
+func (nr *NeighborLookupResult) gather_node_stp_state() (err error) {
+    if nr.stp != nil {
+        return fmt.Errorf("neighbor link state is already populated: %v", nr)
     }
 
-    mgmtip, err := get_suitable_mgmt_ip((*n).MgmtIPs)
-    if err != nil {return err}
+    /*mgmtip, err := get_suitable_mgmt_ip(n.MgmtIPs)
+    if err != nil {return err}*/
 
-    stp := http_get_node_stp_port_state(mgmtip)
-    (*n).PortState = stp
+    if nr.origin == ORIGIN_TOPOLOGYD {
+        stp := http_get_node_stp_port_state(nr.ip)
+        nr.stp = stp
+    } else if ARGV.gather_snmp && nr.origin == ORIGIN_SNMP {
+        stp := nr.snmp_get_node_stp_port_state()
+        nr.stp = stp
+    }
 
     return nil
 }
 
-// Map keyed by primary MgmtIP to that node's Neighbors
-type NodeMap map[string]NeighborSlice
+// Map keyed by primary MgmtIP to that node's Neighbors and other info
+type NodeMap map[string]NeighborLookupResult
+
+// look up the STP state for all nodes
+func (n *NodeMap) gather_stp_states() {
+    for k, node := range *n {
+        node.gather_node_stp_state()
+        (*n)[k] = node
+    }
+}
 
 // Wrapper for verbose log messages used by the neighbor gathering process
 func log_gather(format string, arg... interface{}) {
@@ -354,11 +371,21 @@ func log_gather(format string, arg... interface{}) {
 
 // Send HTTP GET or SNMP requests to obtain neighbors from hosts and handle
 // errors
-func get_node_neighbors(ip string) (ret NeighborSlice) {
+func get_node_neighbors(ip string) (ret NeighborLookupResult) {
     ret, err := http_get_node_neighbor_info(ip)
+
+    // XXX will make an attempt to contact the node via SNMP iff the connection
+    // on the topologyd port was refused or the HTTP connection times out.
+    // This is a somewhat dirty heuristic.
+    if ARGV.gather_snmp &&
+        (errors.Is(err, syscall.ECONNREFUSED) || os.IsTimeout(err)) {
+
+        log.Println("No topologyd found, trying SNMP...")
+        ret, err = snmp_lookup_neighbors(ip)
+    }
     if err != nil {
         log.Printf("GET neighbors from '%s': error: %s. Skipping.", ip, err)
-    } else if ret == nil {
+    } else if ret.ns == nil {
         log.Printf("GET neighbors from '%s': something is fishy, no neighbors or error returned. Skipping.", ip)
     }
     return
@@ -374,22 +401,40 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
 
     log_gather("== Begin gathering neighbors ==")
     start:= http_get_host_mgmt_ip(ARGV.start_host)
-    ip   := start
-    todo := []string{ ip }
+    todo := []string{ start }
     iter := 0
+    ip := start
 
+    // Get all hosts that respond to broadcast ping from the kernel's NDP table
+    macToIpMap, err := ndp_get_neighbors(ARGV.netif_link_local_ipv6)
+    if err != nil {log.Println(err)} // Continue anyway
+    // Add all hosts found in table to the todo list
+    for _, v := range macToIpMap {
+        smi, err := get_suitable_mgmt_ip(v)
+        if err != nil {log.Println(err); continue}
+        todo = append(todo, smi)
+    }
+
+    // TODO this loop should run in parallel, see file:todo.org::*Parallelize
+
+    // loop over these nodes (in parallel goroutines) to get their LLDP
+    // neighbors - either via topologyd's JSON API or if unavailable SNMP
     for len(todo) > 0 {
         ip, todo = todo[0], todo[1:]
+        if v, found := neighbors[ip]; found && v.ip == ip { // check to see if it isn't empty
+            log.Println("Neighbor was already queried, skipping.")
+            continue
+        }
         iter++
         log_gather(bold("Processing #%d (host %s), todo list: %v"), iter, ip, todo)
 
-        cur := get_node_neighbors(ip)
-        if len(cur) < 1 {continue}
+        nres := get_node_neighbors(ip)
+        if len(nres.ns) < 1 {continue} // node reports no neighbors, skip for now... FIXME
 
-        neighbors[ip] = cur
+        neighbors[ip] = nres
 
-        for i, neigh := range cur { // loop over all found neighbors
-            log_gather("Neighbor (%d/%d): %+v", i+1, len(cur), neigh)
+        for i, neigh := range nres.ns { // loop over all found neighbors
+            log_gather("Neighbor (%d/%d): %+v", i+1, len(nres.ns), neigh)
 
             newip, err := get_suitable_mgmt_ip(neigh.MgmtIPs)
             if err != nil {
@@ -401,7 +446,7 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
             // previously looked-up todo list entries
             if _, found := neighbors[newip]; !found {
                 // initialize hashtable location to nil for deduplication
-                neighbors[newip] = nil
+                neighbors[newip] = NeighborLookupResult{origin: 42}
                 todo = append(todo, newip)
             }
         }
@@ -410,9 +455,7 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
 
     if ARGV.query_stp_state {
         log_gather("== Begin gathering STP state ==")
-        for _, v := range neighbors {
-            v.gather_stp_states()
-        }
+        neighbors.gather_stp_states()
         log_gather("== End gathering STP state ==")
     }
 
@@ -423,15 +466,15 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
 // any one of its peers that knows about it
 func (ns *NodeMap) mirror_mirror_on_the_wall(node string) Neighbor {
     node_neighbors := (*ns)[node]
-    if len(node_neighbors) == 0 {return Neighbor{}} // a hermit has no neighbors
+    if len(node_neighbors.ns) == 0 {return Neighbor{}} // a hermit has no neighbors
 
-    for _, peer := range node_neighbors {
+    for _, peer := range node_neighbors.ns {
         if peer.IsEmpty() {continue} // I never introduced myself when I moved in
         peer_ip, err := get_suitable_mgmt_ip(peer.MgmtIPs)
         if err != nil {continue}
         peer_neighbors := (*ns)[peer_ip]
 
-        mirror_image, ok := peer_neighbors.find_neighbor_by_ip(node)
+        mirror_image, ok := peer_neighbors.ns.find_neighbor_by_ip(node)
         if !ok || mirror_image.IsEmpty() {continue}
 
         return mirror_image
@@ -443,8 +486,8 @@ func (ns *NodeMap) mirror_mirror_on_the_wall(node string) Neighbor {
 // PortState (i.e. smaller value of the PortState enum) of the two.
 func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
     // all neighbors reported by node and peer
-    node_neighbors := (*ns)[node]
-    peer_neighbors := (*ns)[peer]
+    node_neighbors := (*ns)[node].ns
+    peer_neighbors := (*ns)[peer].ns
 
     // find the Neighbor struct reported by each for the other
     n1, _ := node_neighbors.find_neighbor_by_ip(peer)
@@ -468,7 +511,7 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
     if1 := n1.SourceIface
     if2 := n2.SourceIface
 
-    if ps1,  ps2 := n1.PortState[if2], n2.PortState[if1];
+    if ps1,  ps2 := (*ns)[node].stp[if2], (*ns)[peer].stp[if1];
        ps1 < ps2 {
         return ps1
     } else {
@@ -480,7 +523,7 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
 // sees target
 func (ns NodeMap) GetSourceIface(source string, target string) *string {
     sn := ns[source]
-    if t, found := sn.find_neighbor_by_ip(target); !found {
+    if t, found := sn.ns.find_neighbor_by_ip(target); !found {
         return nil
     } else if t.SourceNeighbor != source {
         log.Printf("Huh??? Found neighbor of %s but the source neighbor isn't"+
@@ -507,16 +550,16 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
         if id == "" {id = "undefined"}
         var color = "black"
         if meta.Origin == ORIGIN_TOPOLOGYD {
-            color = "gray"
+            color = "green"
         }
         text := fmt.Sprintf("\t\"%s\" [shape=box,color=\"%s\",label=\""+
-            "Hostname: %s\\n"+
+            "Hostname: %s (origin=%d)\\n"+
             "%s identifier: %s\\n"+
             "IP: %s\"]",
             //TODO escape strings
             node.Label,
             color,
-            meta.Hostname,
+            meta.Hostname, meta.Origin,
             strings.ToUpper(meta.IdType.String()), id,
             node.Label,
 
@@ -583,7 +626,8 @@ func main() {
     flag.BoolVar(     &ARGV.prefer_ipv6,       "prefer-ipv6",           true, "prefer IPv6 addresses reported by LLDP (otherwise, use the first one found)")
     flag.BoolVar(     &ARGV.query_stp_state,   "query-stp-state",       true, "enable querying STP state")
     flag.BoolVar(     &ARGV.gather_verbose,    "gather-verbose",        true, "whether or not to print neighbors as they are gathered")
-    flag.BoolVar(     &ARGV.gather_snmp,     "gather-snmp",              true, "whether or not to gather node neighbors via snmp if the node doesn't respond to a topologyd API request")
+    flag.BoolVar(     &ARGV.snmp_verbose,    "snmp-verbose",            true, "whether or not to print snmp lookups verbosely")
+    flag.BoolVar(     &ARGV.gather_snmp,    "gather-snmp",              true, "whether or not to gather node neighbors via snmp if the node doesn't respond to a topologyd API request")
     flag.StringVar(   &ARGV.host_prefix,    "host-prefix",          "dc3500", "hostnames that don't start with this string generate a warning if found (set to '' to disable)")
     flag.StringVar(   &ARGV.data_dir,       "data-dir",     "/var/topologyd", "directory name where files are stored")
     flag.DurationVar( &ARGV.monitoring_freq,"monitoring-freq", 2*time.Minute, "frequency of topology change monitoring (0 disables)")

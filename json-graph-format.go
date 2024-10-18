@@ -29,13 +29,13 @@ func jgf_generate_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
 
 	i := 0
 	for node_addr, lldp_info := range *nodes {
-        if lldp_info == nil {
+        if lldp_info.ns == nil {
             log.Printf("Error: neighbor '%s' has nil neighbors instead "+
                 "of empty list. This can mean topologyd isn't running there or "+
 				"it is a bug.", node_addr)
 		}
 
-		node_info := nodes.mirror_mirror_on_the_wall(node_addr)
+		node_info := nodes.mirror_mirror_on_the_wall(node_addr) // TODO check if this info is better kept in NodeMap
 		metadata, _ := json.Marshal(node_info)
 		if node_info.IsEmpty() { metadata, _ = json.Marshal(nil) }
 		jnodes[i] = jgf.Node{
@@ -56,8 +56,8 @@ func jgf_generate_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
 	dedup := make(map[IpTuple]bool, 2*len(*nodes))
 
 	for node_addr, lldp_info := range *nodes {
-		if lldp_info == nil { continue } // error already logged above
-		for _, neighbor := range lldp_info {
+		if lldp_info.ns == nil { continue } // error already logged above
+		for _, neighbor := range lldp_info.ns {
 			neighbor_addr, err := get_suitable_mgmt_ip(neighbor.MgmtIPs)
 			if err != nil {
 				log.Printf("Unable to get MgmtIP from %s: %s", neighbor_addr, err)
@@ -73,9 +73,11 @@ func jgf_generate_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
 			metadata, _ := json.Marshal(EdgeMetadata{
 				SourceInterface: nodes.GetSourceIface(node_addr, neighbor_addr),
 				TargetInterface: nodes.GetSourceIface(neighbor_addr, node_addr),
+				// TODO Add list of all neighbors here?
 			})
 
 			link_state := nodes.stp_link_state(node_addr, neighbor_addr)
+			log.Println(node_addr, neighbor_addr, link_state)
 			// add jgf.Edge
  			jedges = append(jedges, jgf.Edge{
 				Source:   node_addr,
@@ -166,7 +168,7 @@ func jgf_get_neighbors(g jgf.Graph, node_ips MgmtIPs) (ns NeighborSlice, err err
 				k, v.Label)
 		}
 
-		neigh.PortState = nil
+		//neigh.PortState = nil
 		ns = append(ns, neigh)
 	}
 
