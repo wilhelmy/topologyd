@@ -1,4 +1,4 @@
-package main
+package topologyD
 // This file is used to implement the STP related parts of the JSON API,
 // wrapping all mstpd specific code into one file for ease of switching the
 // underlying STP implementation.

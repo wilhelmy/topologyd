@@ -1,4 +1,4 @@
-package main
+package topologyD
 
 import (
 	"bytes"
@@ -118,7 +118,7 @@ func ndp_get_mac_map(iface string) (res IpsToMacMap, err error) {
 	return
 }
 
-// look up an IP address in the NDP table. Return true if the vendor of the
+// ndp_is_microsens looks an IP address in the NDP table. Return true if the vendor of the
 // corresponding MAC address is microsens.
 func ndp_is_microsens(host string) bool {
 	macs, _ := ndp_get_mac_map(ARGV.netif_link_local_ipv6)

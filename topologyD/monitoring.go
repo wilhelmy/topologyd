@@ -1,6 +1,6 @@
 // This file concerns itself with monitoring known neighbors and generating
 // warnings if the network topology changes unexpectedly.
-package main
+package topologyD
 
 import (
 	"bytes"

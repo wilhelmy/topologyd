@@ -1,6 +1,6 @@
 // This file bridges the gap between JGFv2 data structures from package jgf and
 // structs from the main package
-package main
+package topologyD
 
 import (
 	"bytes"

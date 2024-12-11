@@ -1,5 +1,5 @@
 // main file of topologyd. Contains glue code, main logic and HTTP handling.
-package main
+package topologyD
 
 import (
 	"bytes"
@@ -609,7 +609,7 @@ func datadir_file(filename string) string {
 }
 
 /**** Main loop ***********************************************************************/
-func main() {
+func Main() {
     // add file name + line number to log output
     log.SetFlags(log.LstdFlags | log.Lshortfile)
 
