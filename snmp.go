@@ -14,8 +14,6 @@ import (
 func snmp_init() {
 	log_snmp("snmp_init")
 
-	// verbose logging? always on for now
-	//gosnmp.Default.Logger  = gosnmp.NewLogger(log.Default())
 	gosnmp.Default.Version = gosnmp.Version2c;
 	gosnmp.Default.ExponentialTimeout = false;
 	gosnmp.Default.Timeout = time.Duration(2) * time.Second
@@ -284,7 +282,7 @@ func snmp_collect_locport_data(dataUnit gosnmp.SnmpPDU, ports PortDataMap) (err 
 }
 
 // wow, lots of boilerplate and no nice way to express it!
-func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor, ports PortDataMap) (err error) {
+func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor, ports PortDataMap, isMicrosens bool) (err error) {
 	snmp_print(dataUnit)
 	n := Neighbor{ Origin: ORIGIN_SNMP }
 
@@ -393,8 +391,6 @@ func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor,
 		if idtype != 1 && idtype != 2 {
 			log.Println("Eeep! SNMP Neighbor reported strange Management IP address family type:", idtype)
 		}
-		// FIXME should this be assgined back into the neighbor?
-
 		// As this isn't stored anywhere, there isn't much point retrieving it.
 		// We're parsing the management address as both IPv4 and IPv6 below and
 		// if that doesn't work out then we won't be friends.
@@ -402,9 +398,14 @@ func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor,
 		// Seems at least Mikrotik's SNMP implementation  only reports one IP
 		// address here? Kind of nasty when there's multiple addresses assigned
 		// and we're interested in one particular address family (IPv6 in our
-		// case) but such is life.
+		// case). Also in case there's more than one neighbor host, only one
+		// will have its MgmtIP returned.
 
-		// FIXME this feature seems to be broken in microsens' firmware
+		// Since reporting MgmtIP addresses is broken in microsens' firmware
+		// work around it by skipping this record if it originates from a
+		// microsens machine
+		if isMicrosens {return}
+
 		iidx, err = snmp_oid_cutval(idx, 2, 1)
 		if err != nil {return}
 		n, _ = neighbors[iidx]
@@ -419,7 +420,7 @@ func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor,
 	//if is {log.Printf("'%+v'(%T): %+v", idx, idx, neighbors[iidx])}
 
 	// If this neighbor is found in the port information assign its SourceIface
-    if neigh, found := neighbors[iidx]; false && is && found {
+    if neigh, found := neighbors[iidx]; iidx != 0 && is && found {
 		// FIXME is it always the last value, or only on microsens??!? check MIB and other switch impl
 		port, found := ports[iidx]
 		if !found {
@@ -440,31 +441,20 @@ func snmp_lookup_neighbors(host string) (res NeighborLookupResult, err error) {
 	return
 }
 
-/*
-func snmp_get_source_iface(host string, ports PortDataMap) error {
-	for k, v := range ports {
-		//if v.PortNum ==
-		return err
-        }}}}}
-	}
-}
-*/
-
 func log_snmp(format string, arg... interface{}) {
     if ARGV.snmp_verbose {
         log.Printf(format, arg...)
     }
 }
 
-func snmp_get_node_locport_data(host string) (ret PortDataMap) {
+func snmp_get_node_locport_data(host string) (ret PortDataMap, err error) {
 	log_snmp("=> Entering SNMP/LocPort Disco")
-    ret = snmp_get_node_locport_data_(host)
+    ret, err = snmp_get_node_locport_data_(host)
 	log_snmp("<= Leaving SNMP/LocPort Disco")
 	return
 }
 
-func snmp_get_node_locport_data_(host string) (ret PortDataMap) {
-	var err error
+func snmp_get_node_locport_data_(host string) (ret PortDataMap, err error) {
 	snmp, err := snmp_connect(host)
 	if err != nil {return}
 	ret = make(PortDataMap)
@@ -476,7 +466,7 @@ func snmp_get_node_locport_data_(host string) (ret PortDataMap) {
 		return snmp_collect_locport_data(pdu, ret)
 	}); err != nil {
 		log.Println("SNMP lookup aborted due to error:", err)
-		return nil
+		return nil, err
 	}
 
 	return
@@ -490,15 +480,17 @@ func snmp_lookup_neighbors_(host string) (res NeighborLookupResult, err error) {
 	// and the entire lookup finishes in 2 SNMP requests on the test setup.
 	snmp, err := snmp_connect(host)
 	if err != nil {return}
-	var ports PortDataMap
+	ports, err := snmp_get_node_locport_data(host)
+	if err != nil {return}
 
 	// Maps SNMP indexes of LLDP-MIB::lldpRemEntry to corresponding Neighbor
 	// struct while the individual fields are being gathered
 	neighbors := make(map[int]Neighbor)
+	isMicrosens := ndp_is_microsens(host)
 
 	if err = snmp_bulkwalk(snmp, S_REM, func(pdu gosnmp.SnmpPDU) error {
 		// closure that captures the neighbors map to pass values out
-		return snmp_collect_neighbors(pdu, neighbors, ports)
+		return snmp_collect_neighbors(pdu, neighbors, ports, isMicrosens)
 	}); err != nil {
 		log.Println("SNMP lookup aborted due to error:", err)
 		return
@@ -516,13 +508,32 @@ func snmp_lookup_neighbors_(host string) (res NeighborLookupResult, err error) {
 	// handler function)
 	var ret NeighborSlice
 	for _,v := range neighbors {
+		if v.IsEmpty() {continue} // a port with nothing attached
+		if len(v.MgmtIPs) == 0 && v.IdType == MAC_ID {
+			// This is mainly a workaround for Microsens Switches (6-Port GBE
+			// Micro Switch G6 POE+, Firmware version 12.8.0a) which have broken
+			// MgmtIP support in their SNMP/LLDP stack and do not pass MgmtIP
+			// addresses out via SNMP, so get them from the NDP table if
+			// possible.
+			//
+			// By default, Linux bridge interfaces get a random MAC address
+			// assigned. In this case, this code will break, so you have to
+			// manually ensure that the Linux machine in question has the same
+			// MAC as ChassisID as well as MAC address on br0.
+			go icmp6_ping_broadcast(ARGV.netif_link_local_ipv6)
+			time.Sleep(200*time.Millisecond)
+			vv, err := ndp_get_neighbors(ARGV.netif_link_local_ipv6)
+			if err == nil {
+				if ip, found := vv[v.Identifier]; found  {
+					v.MgmtIPs = ip
+				}
+			}
+		}
 		v.Origin         = ORIGIN_SNMP
 		v.SourceNeighbor = host
-		//v.SourceIface    = //passed in through
 		ret = append(ret, v)
 	}
 
-	ports = snmp_get_node_locport_data(host)
 	res = NeighborLookupResult{
 		ns:               ret,
 		origin:           ORIGIN_SNMP,
@@ -530,13 +541,15 @@ func snmp_lookup_neighbors_(host string) (res NeighborLookupResult, err error) {
 		snmp_locportdata: ports,
 	}
 
-	log.Printf("XXX debug %+v", res) //XXX debug
 	return
 }
 
-func snmp_collect_stp_data(pdu gosnmp.SnmpPDU, stp_states map[string]int) (err error) {
+func snmp_collect_stp_data(pdu gosnmp.SnmpPDU, stp_states map[int]int) (err error) {
+	var iidx int
 	if is,idx := snmp_cut(S_STPPORTSTATE, pdu.Name); is {
-		if stp_states[idx], err = snmp_toint(pdu); err != nil {return}
+		iidx, err = strconv.Atoi(idx)
+		if err != nil {return}
+		if stp_states[iidx], err = snmp_toint(pdu); err != nil {return}
 		//if n.SourceIface, err = snmp_toint(pdu); err != nil {return}
 		snmp_print(pdu)
 	} else {
@@ -554,8 +567,7 @@ func (nr *NeighborLookupResult) snmp_get_node_stp_port_state() (ret PortToStateM
 		return nil
 	}
 
-	stp_states := make(map[string]int)
-
+	stp_states := make(map[int]int)
 	if err = snmp_bulkwalk(snmp, S_STPPORTSTATE, func(pdu gosnmp.SnmpPDU) error {
 		// closure that captures the neighbors map to pass values out
 		return snmp_collect_stp_data(pdu, stp_states)
@@ -566,11 +578,11 @@ func (nr *NeighborLookupResult) snmp_get_node_stp_port_state() (ret PortToStateM
 
 	// See http://oidref.com/1.3.6.1.2.1.17.2.15.1.3
 	mapping := map[int]PortState {
-		// XXX is this mapping correct? mstpd only knows Discarding, Learning,
-		// Forwarding and Unknown, seems some other SNMP devices might know more
+		// This mapping is based on CISCO's mapping of STP states to RSTP states.
+		// https://www.cisco.com/c/en/us/td/docs/optical/15000r8_5/ethernet/454/guide/r85ether/r85swstp.html#wp1127767
 		1: Discarding,       // disabled(1),
 		2: Discarding,       // blocking(2),
-		3: Learning,         // listening(3),
+		3: Discarding,       // listening(3),
 		4: Learning,         // learning(4),
 		5: Forwarding,       // forwarding(5),
 		6: Unknown,          // broken(6)
@@ -583,10 +595,9 @@ func (nr *NeighborLookupResult) snmp_get_node_stp_port_state() (ret PortToStateM
 			log.Println("STP: remote SNMP server returned invalid value")
 			mapv = Unknown
 		}
-		ret[k] = mapv
+		key := nr.snmp_locportdata[k].PortDesc // assumes PortDesc is unique
+		ret[key] = mapv
 	}
-
-	//FIXME nr.snmp_locportdata = ret
 
 	return
 }

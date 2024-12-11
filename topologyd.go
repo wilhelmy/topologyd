@@ -1,4 +1,4 @@
-/* main file of topologyd. Contains glue code, main logic and HTTP handling. */
+// main file of topologyd. Contains glue code, main logic and HTTP handling.
 package main
 
 import (
@@ -337,9 +337,6 @@ func (nr *NeighborLookupResult) gather_node_stp_state() (err error) {
         return fmt.Errorf("neighbor link state is already populated: %v", nr)
     }
 
-    /*mgmtip, err := get_suitable_mgmt_ip(n.MgmtIPs)
-    if err != nil {return err}*/
-
     if nr.origin == ORIGIN_TOPOLOGYD {
         stp := http_get_node_stp_port_state(nr.ip)
         nr.stp = stp
@@ -406,6 +403,7 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
     ip := start
 
     // Get all hosts that respond to broadcast ping from the kernel's NDP table
+    icmp6_ping_broadcast(ARGV.netif_link_local_ipv6)
     macToIpMap, err := ndp_get_neighbors(ARGV.netif_link_local_ipv6)
     if err != nil {log.Println(err)} // Continue anyway
     // Add all hosts found in table to the todo list
@@ -416,13 +414,13 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
     }
 
     // TODO this loop should run in parallel, see file:todo.org::*Parallelize
-
+    //
     // loop over these nodes (in parallel goroutines) to get their LLDP
     // neighbors - either via topologyd's JSON API or if unavailable SNMP
     for len(todo) > 0 {
         ip, todo = todo[0], todo[1:]
         if v, found := neighbors[ip]; found && v.ip == ip { // check to see if it isn't empty
-            log.Println("Neighbor was already queried, skipping.")
+            log.Printf("Neighbor '%s' was already queried, skipping.", ip)
             continue
         }
         iter++
@@ -493,8 +491,8 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
     n1, _ := node_neighbors.find_neighbor_by_ip(peer)
     n2, _ := peer_neighbors.find_neighbor_by_ip(node)
 
-    // this synchronization errors could occur if topologyd isn't running or
-    // mstpd doesn't work right
+    // this synchronization errors where one peer sees the other but not in
+    // return could occur if topologyd isn't running or mstpd doesn't work properly
     if n2.IsEmpty() {
         log.Printf("Warning: no reply from peer %s reported by node %s as %+v. Is mstpd/topologyd running?", peer, node, n1)
         return Unknown
@@ -511,7 +509,7 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
     if1 := n1.SourceIface
     if2 := n2.SourceIface
 
-    if ps1,  ps2 := (*ns)[node].stp[if2], (*ns)[peer].stp[if1];
+    if ps1,  ps2 := (*ns)[node].stp[if1], (*ns)[peer].stp[if2];
        ps1 < ps2 {
         return ps1
     } else {

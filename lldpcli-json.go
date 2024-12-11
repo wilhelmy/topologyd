@@ -285,7 +285,7 @@ type NeighborLookupResult struct {
 	ip                string                                     // IP address this was received from
 	mac               string                                     // MAC address of this host
 	stp               PortToStateMap    `json:"STPPortState"`    // STP port state as reported by this neighbor
-	snmp              PortDataMap                                // Network port table of this host received via SNMP
+	snmp_locportdata  PortDataMap                                // Network port table of this host received via SNMP
 }
 
 // There should only ever be one element in this map, and not all data is
@@ -380,11 +380,12 @@ func (n *Neighbor) ValidateHostname() {
 
 // Checks whether or not this neighbor has been initialized with data
 func (n Neighbor) IsEmpty() bool {
+	// explicitly not checking for SourceIface, sometimes Microsens SNMP gets
+	// such responses for ports where nothing is connected
 	return n.Descr == "" &&
 		n.Hostname == "" &&
 		n.IdType == UNKNOWN_ID &&
 		n.Identifier == "" &&
-		n.SourceIface == "" &&
 		len(n.MgmtIPs) == 0
 }
 

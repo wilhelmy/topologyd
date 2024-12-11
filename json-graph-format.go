@@ -77,7 +77,6 @@ func jgf_generate_graph(start string, nodes *NodeMap) (jgraph jgf.Graph) {
 			})
 
 			link_state := nodes.stp_link_state(node_addr, neighbor_addr)
-			log.Println(node_addr, neighbor_addr, link_state)
 			// add jgf.Edge
  			jedges = append(jedges, jgf.Edge{
 				Source:   node_addr,
