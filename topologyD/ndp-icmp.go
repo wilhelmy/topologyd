@@ -8,12 +8,13 @@ import (
 	"strings"
 )
 
-// run_command runs command `exe`, capturing its standard output and standard error.
-// It prints stderr immediately if nonempty and returns the string from the
-// command's stdout as `res` for further processing and `err` if the external
-// program did not exit cleanly.
+// run_command() runs command «exe», capturing its standard output and standard error.
+// It prints stderr immediately if nonempty.
 //
-// FIXME this is triplicate code, see lldpcli-json.go and mstpd-status.go -- move to topologyd.go
+// Returns the string from the command's stdout as «res» for further processing
+// and «err» if the external program did not exit cleanly.
+//
+// FIXME(mw) this is triplicate code, see lldpcli-json.go and mstpd-status.go -- move to topologyd.go
 func run_command(exe string, arg ...string) (res string, err error) {
 	cmd := exec.Command(exe, arg...)
 
@@ -37,9 +38,11 @@ func run_command(exe string, arg ...string) (res string, err error) {
     return res, err
 }
 
-// icmp_ping_host executes the system ping(8) utility on host `host` to send
+// icmp_ping_host() executes the system ping(8) utility on host «host» to send
 // three ICMP echo requests, the last of which waits for 1 second. Output is
-// discarded. Returns `err` if an error occured.
+// discarded.
+//
+// Returns «err» if an error occured.
 func icmp_ping_host(host string) (err error) {
 	// Sends three packets for good measure in case one of them gets lost
 	_, err = run_command("ping", "-c1", host)
@@ -51,17 +54,22 @@ func icmp_ping_host(host string) (err error) {
 	return
 }
 
-// broadcast ping, discards its output - only used to refresh the NDP table
+// icmp6_ping_broadcast() performs a broadcast ping on interface «iface»,
+// discarding its output - only used to refresh the NDP table.
+//
+// Returns «err» on error.
 func icmp6_ping_broadcast(iface string) (err error) {
 	return icmp_ping_host("ff02::1%"+iface)
 }
 
-// MacToIpsMap maps a MAC address to a list of IPs associated to that IP inside the kernel's NDP table
+// MacToIpsMap maps a MAC address to a list of IPs associated to that IP inside the kernel's NDP table.
 type MacToIpsMap map[string][]string
 
-// ndp_get_neighbors gets the NDP neighbors by calling iproute's ip(8) command
-// to query the kernel's NDP table for interface `iface`.
-// Returns `err` in case of error or `res` (keyed by MAC address) in case of success.
+// ndp_get_neighbors() gets the NDP neighbors by calling iproute's ip(8) command
+// to query the kernel's NDP table for interface «iface».
+//
+// Returns «err» in case of error or «res» (keyed by MAC address) in case of
+// success.
 func ndp_get_neighbors(iface string) (res MacToIpsMap, err error) {
 	// we are actually interested in the "-br"ief output but iproute2 on the
 	// machine is too old so just throw away all excess info
@@ -89,14 +97,15 @@ func ndp_get_neighbors(iface string) (res MacToIpsMap, err error) {
 	return
 }
 
-// IpsToMacMap map the kernel's NDP table IP addresses to their corresponding MAC address
+// IpsToMacMap maps the kernel's NDP table IP addresses to their corresponding MAC address.
 type IpsToMacMap map[string]string
 
-// ndp_get_mac_map gets the NDP neighbors by calling iproute's ip(8) command to
-// query the kernel's NDP table for interface `iface`.
-// Returns `err` in case of error or `res` (keyed by IP address) in case of success.
+// ndp_get_mac_map() gets the NDP neighbors by calling iproute's ip(8) command to
+// query the kernel's NDP table for interface «iface».
+//
+// Returns «res» (keyed by IP address) in case of success, «err» in case of error.
 func ndp_get_mac_map(iface string) (res IpsToMacMap, err error) {
-	// FIXME this is practically the same as ndp_get_neighbors but pivoted.
+	// FIXME(mw) this is practically the same as ndp_get_neighbors but pivoted.
 	// Instead of the code duplication, one could call the other.
 	out, err := run_command("ip", "neigh", "show", "dev", iface)
 	if err != nil {return}
@@ -118,8 +127,9 @@ func ndp_get_mac_map(iface string) (res IpsToMacMap, err error) {
 	return
 }
 
-// ndp_is_microsens looks an IP address in the NDP table. Return true if the vendor of the
-// corresponding MAC address is microsens.
+// ndp_is_microsens() looks up an IP address «host» in the NDP table.
+//
+// Returns true if the vendor of the corresponding MAC address is Microsens.
 func ndp_is_microsens(host string) bool {
 	macs, _ := ndp_get_mac_map(ARGV.netif_link_local_ipv6)
 	if mac, found := macs[host]; found && strings.HasPrefix(mac, "00:60:a7") {

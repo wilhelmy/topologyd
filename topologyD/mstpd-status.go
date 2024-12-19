@@ -1,7 +1,11 @@
 package topologyD
-// This file is used to implement the STP related parts of the JSON API,
-// wrapping all mstpd specific code into one file for ease of switching the
-// underlying STP implementation.
+
+// This file contains the the STP related parts of the JSON API, wrapping all
+// mstpd specific code into one file for ease of switching the underlying STP
+// implementation. The resulting JSON API queries the port state from mstpd,
+// throwing away all excess information. It then serves a user-visible read-only
+// API endpoint that provides a simple key-value object mapping port names to
+// their STP state.
 
 import (
 	"fmt"
@@ -12,6 +16,7 @@ import (
 )
 
 // run mstpctl to extract information
+// TODO(mw) triplicate code
 func run_mstpctl(arg ...string) ([]byte, error) {
 	args := []string{"-f", "json"}
 	args = append(args, arg...)
@@ -24,7 +29,8 @@ func run_mstpctl(arg ...string) ([]byte, error) {
 	return out.Bytes(), err
 }
 
-// Converted from mstpctl output
+// struct MstpdShowportResult{} corresponds to "mstpctl -f json showport"
+// command output.
 type MstpdShowportResult struct {
 	Port             string     `json:"port"`
 	Bridge           string     `json:"bridge"`
@@ -40,18 +46,26 @@ type MstpdShowportResult struct {
 }
 
 
-// Get JSON output from running e.g. "mstpctl -f json showport br0"
+// mstpd_get_showport_result() reads the JSON output from running a command such
+// as "mstpctl -f json showport br0". «bridge_if» specifies which bridged
+// interface to extract data from.
+//
+// Returns the data as byte slice «ret» if successful, or «err» otherwise.
 func mstpd_get_showport_result(bridge_if string) (ret []byte, err error) {
 	ret, err = run_mstpctl("showport", bridge_if)
 	return
 }
 
-// Read command output into the struct specified above
+// mstpd_parse_showport_result() parses the command output of
+// mstpd_get_showport_result() from the byte slice «in».
+//
+// Returns «ret» if successful, «err» otherwise.
 func mstpd_parse_showport_result(in []byte) (ret []MstpdShowportResult, err error) {
 	err = json.Unmarshal(in, &ret)
 	return
 }
 
+// PortState is an enum type for the four different RSTP port states.
 type PortState int
 const (
 	Unknown PortState = iota
@@ -60,6 +74,8 @@ const (
 	Forwarding
 )
 
+// Mappings back and forward between the enum values for PortState and
+// corresponding strings
 var (
 	portStateName = map[PortState]string {
 		Unknown:    "unknown",
@@ -75,14 +91,18 @@ var (
 	}
 )
 
-// Convert PortState to String representation
+// (PortState).String() converts PortState «p» to String representation.
+//
+// Returns string representation «s».
 func (p PortState) String() (s string) {
 	s = portStateName[p]
 	return
 }
 
-// Convert string to PortState representation
-func ParsePortState(s string) (PortState, error) {
+// ParsePortState() converts string «s» to PortState enum representation.
+//
+// Returns PortState «p» on success and «err» on error.
+func ParsePortState(s string) (p PortState, err error) {
 	value, ok := portStateValue[s]
 	if !ok {
 		return PortState(0),
@@ -92,10 +112,20 @@ func ParsePortState(s string) (PortState, error) {
 	return PortState(value), nil
 }
 
-func (p PortState) MarshalJSON() ([]byte, error) {
+// (PortState).MarshalJSON() is the JSON marshaling function for the PortState
+// type for interface json.Marshaler. It Marshals PortState «p» into a JSON byte
+// slice.
+//
+// Returns «data» in case of success and «err» in case of error.
+func (p PortState) MarshalJSON() (data []byte, err error) {
 	return json.Marshal(p.String())
 }
 
+// (*PortState).UnmarshalJSON is the unmarshaling function for PortState type
+// for interface json.Unmarshaler. Unmarshals a byte slice «data» into the
+// PortState «p».
+//
+// Returns «err» on error.
 func (p *PortState) UnmarshalJSON(data []byte) (err error) {
     var portState string
     if err := json.Unmarshal(data, &portState); err != nil {
@@ -107,14 +137,26 @@ func (p *PortState) UnmarshalJSON(data []byte) (err error) {
     return nil
 }
 
+// (PortState).LinkColor() returns a display color for the ethernet RSTP link
+// state described by PortState «p» for use in graphviz or HTML.
 func (p PortState) LinkColor() string {
 	return [...]string{ "purple", "lightgray", "darkgreen", "black" }[p]
 }
 
+// A map type alias to map from the interface name of a network port to the STP
+// port state of that port
 type PortToStateMap map[string]PortState
 
-// Format Mstpd_parse_port_state result into mstpd independent JSON format
-func STP_get_port_state_json(iface string) (ret []byte) {
+// stp_get_port_state_json() formats mstpd_parse_port_state() result on bridge
+// interface «iface» into a portable JSON format which maps interface names to
+// RSTP port states. Logs errors internally.
+//
+// Returns «ret» as byte slice ready for serving via HTTP, or an empty slice on
+// error.
+//
+// Example JSON:
+//   {"en0": "discarding", "en1": "forwarding"}
+func stp_get_port_state_json(iface string) (ret []byte) {
 	mjson, err := mstpd_get_showport_result(iface)
 	if err != nil {log.Printf("mstpd json response error: %s", err); return}
 
@@ -132,7 +174,11 @@ func STP_get_port_state_json(iface string) (ret []byte) {
 	return
 }
 
-func STP_parse_port_state_json(in []byte) (ret PortToStateMap) {
+// stp_parse_port_state_json() parses the byte slice «in», logging errors
+// internally.
+//
+// Returns result as «ret», or nil on error.
+func stp_parse_port_state_json(in []byte) (ret PortToStateMap) {
 	err := json.Unmarshal(in, &ret)
 	if err != nil {log.Printf("STP json response error: %s", err)}
 	return

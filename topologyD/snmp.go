@@ -1,9 +1,9 @@
 package topologyD
 
 import (
-	//"fmt"
 	"fmt"
 	"log"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +11,7 @@ import (
 	"github.com/gosnmp/gosnmp"
 )
 
+// snmp_init() is called by Main() to initialize the SNMP functionality.
 func snmp_init() {
 	log_snmp("snmp_init")
 
@@ -18,28 +19,46 @@ func snmp_init() {
 	gosnmp.Default.ExponentialTimeout = false;
 	gosnmp.Default.Timeout = time.Duration(2) * time.Second
 	gosnmp.Default.Retries = 2;
-	// TODO set gosnmp.Default.Timeout, Retries, Community, Port from ARGV
+	// TODO(mw) set gosnmp.Default.Timeout, Retries, Community, Port from ARGV
 }
 
 /**** Helper functions ****************************************************************/
-// snmp_connect creates a handler and connects.
-func snmp_connect(host string) (snmp gosnmp.Handler, err error) {
-	snmp = gosnmp.NewHandler()
-	snmp.SetTarget(fix_linklocal(host))
-	snmp.SetLogger(gosnmp.Default.Logger)
-	snmp.SetTimeout(20*time.Second) //FIXME
-	err = snmp.Connect()
+
+// fix_linklocal() takes an IP address «addr» and returns the same IP address
+// with "%zone" attached if it is an IPv6LL address that's missing the zone
+// qualifier, and returns «addr» unchanged otherwise.
+func fix_linklocal(addr string) string {
+    if ip := net.ParseIP(addr); ip.IsLinkLocalUnicast() {
+        return ip.String() + "%" + ARGV.netif_link_local_ipv6
+    }
+    return addr
+}
+
+// snmp_connect() creates a handler and connects to the SNMP server «host».
+// Returns «handler» in case of success and «err» in case of an error.
+func snmp_connect(host string) (handler gosnmp.Handler, err error) {
+	handler = gosnmp.NewHandler()
+	handler.SetTarget(fix_linklocal(host))
+	handler.SetLogger(gosnmp.Default.Logger)
+	handler.SetTimeout(20*time.Second) // FIXME(mw) SNMP timeout should be configurable. Microsens Switch takes up to 17 seconds to send all data, which is extremely slow.
+	err = handler.Connect()
 	return
 }
 
-// gosnmp 1.37.0 has a bug with requesting OIDs with trailing dots. This works
-// around it by removing them.
-// https://github.com/gosnmp/gosnmp/issues/480
+// snmp_bulkwalk() works around a gosnmp 1.37.0 bug with requesting OIDs with
+// trailing dots. This function removes potential trailing dots from OIDs and
+// performs the BulkWalk with handler «snmp» on OID «oid», calling «walkFn» on
+// every PDU received.
+//
+// Returns nil in case of success, or an error.
+//
+// For the gosnmp issue see https://github.com/gosnmp/gosnmp/issues/480
 func snmp_bulkwalk(snmp gosnmp.Handler, oid string, walkFn gosnmp.WalkFunc) error {
 	return snmp.BulkWalk(strings.TrimSuffix(oid, "."), walkFn)
 }
 
-// snmp_print prints a dataUnit in a somewhat human readable format
+// snmp_print() prints an SNMP PDU «dataUnit» in a somewhat human readable
+// format.
 func snmp_print(dataUnit gosnmp.SnmpPDU) {
 	if !ARGV.snmp_verbose {return}
 	if dataUnit.Type == gosnmp.OctetString {
@@ -52,8 +71,8 @@ func snmp_print(dataUnit gosnmp.SnmpPDU) {
 	}
 }
 
-// snmp_cut returns whether suboid is an instance of oid, and if so, the suboid
-// string with the oid prefix removed
+// snmp_cut() returns whether «suboid» is an instance (i.e. substring) of «oid»,
+// and if so, the suboid string with the oid prefix removed.
 func snmp_cut(oid string, suboid string) (bool, string) {
 	// in case oid does not have a trailing dot, add it to even the playfield
 	if !strings.HasSuffix(oid, ".")    {oid    += "."}
@@ -64,21 +83,21 @@ func snmp_cut(oid string, suboid string) (bool, string) {
 	return false, ""
 }
 
-// snmp_tostring casts a PDU value that's expected to be a string as a string,
-// and returns an error if the type cast fails.
-func snmp_tostring(v gosnmp.SnmpPDU) (r string, err error) {
-	rv, ok := v.Value.([]byte)
+// snmp_tostring() casts a PDU «value» that's expected to be a string as string,
+// and returns it or an error «err» if the type cast fails.
+func snmp_tostring(value gosnmp.SnmpPDU) (r string, err error) {
+	rv, ok := value.Value.([]byte)
 	if !ok {
 		return "", fmt.Errorf(
 			"Invalid SNMP response for %s, string expected, got (%s) %s",
-			v.Name, v.Type.String(), v.Value)
+			value.Name, value.Type.String(), value.Value)
 	}
 	r = string(rv)
 	return
 }
 
-// snmp_toint casts a PDU value that's expected to be an int as an int,
-// and returns an error if the type cast fails.
+// snmp_toint() casts a PDU «value» that's expected to be an int as an int, and
+// returns it or an error «err» if the type cast fails.
 func snmp_toint(v gosnmp.SnmpPDU) (r int, err error) {
 	r, ok := v.Value.(int)
 	if !ok {
@@ -89,24 +108,23 @@ func snmp_toint(v gosnmp.SnmpPDU) (r int, err error) {
 	return
 }
 
-// snmp_err_invalid_oid_index generates errors when parsing indexes of suboids
-// such as when three digits like ...0.101.0 are expected but only two ...0.101 are found
-func snmp_oid_err_invalid_index(oid string, expected int, received int) error {
-	return fmt.Errorf(
-		"SNMP: OID (%s) contained unexpected sequence of index integers (expected %d, got %d)",
-		oid, expected, received)
-}
-
-
-// snmp_oid_cutval cuts a value out of the middle of an OID/SubOID and returns
-// it, such that calling it with ".0.101.1", 3 and 1 returns 101. If the
-// arguments don't match the expectations it returns an error.
+// snmp_oid_cutval cuts a value out of the middle of an OID/SubOID «oid» and
+// returns it, if its arguments don't match the «expected» number of OID
+// subindexes it returns an error. On success, it returns the OID subindex «num»
+// instead.
+//
+// Example:
+//   snmp_oid_cutval(".0.101.1", 3, 1)
+//   => 101, nil
 func snmp_oid_cutval(oid string, expected int, num int) (int, error) {
 	s := strings.Split(strings.Trim(oid, "."), ".")
 	received := len(s)
 	if expected < num {expected = num}
 	if received != expected {
-		return -1, snmp_oid_err_invalid_index(oid, expected, received)
+		return -1,
+			fmt.Errorf(
+				"SNMP: OID (%s) contained unexpected sequence of index integers (expected %d, got %d)",
+				oid, expected, received)
 	}
 	iv, err := strconv.Atoi(s[num])
 	if err != nil {return -1, err}
@@ -115,9 +133,15 @@ func snmp_oid_cutval(oid string, expected int, num int) (int, error) {
 }
 
 /**** Constants ***********************************************************************/
-// SNMP LLDP OIDs. Poor man's MIB :)
-// S_ is short for SNMP, the names of the identifiers and the OID mapping are
-// sourced from LLDP-MIB.
+
+// SNMP LLDP OIDs, the poor man's MIB.
+//
+// In this file, S_ is short for SNMP, the names of the constants and the OID
+// mapping are sourced from the LLDP-MIB as published by the IEEE. gosnmp does
+// not support parsing MIBs (and it doesn't really need to, either), so this
+// block declares all SNMP OIDs used by topologyd as constants. See the
+// corresponding MIB document for more information on these OIDs and how e.g.
+// table entries are numbered for an item in question.
 const (
 	S_LLDP                 = ".1.0.8802.";
 	// Local information: LLDP local chassis
@@ -152,17 +176,24 @@ const (
 	S_REMSYSCAPENABLED     = ".1.0.8802.1.1.2.1.4.1.1.12.";
 	S_REMSYSMANADDRSUBTYPE = ".1.0.8802.1.1.2.1.4.2.1.1.";
 	S_REMSYSMANADDR        = ".1.0.8802.1.1.2.1.4.2.1.2.";
+
+	// SNMP OIDs for obtaining the STP port state - from BRIDGE-MIB
+	S_STPPORTSTATE = ".1.3.6.1.2.1.17.2.15.1.3";
 )
 
-/* wishful thinking that we can query only these and gain performance...
-func _snmp_oids_we_care_about() []string {
-	return []string{
-		S_REMCHASSISIDSUBTYPE, S_REMCHASSISID, S_REMPORTIDSUBTYPE, S_REMPORTID,
-		S_REMSYSNAME, S_REMSYSDESC, S_REMSYSMANADDRSUBTYPE, S_REMSYSMANADDR,
-	}
-}*/
+// TODO(mw) wishful thinking that we can query only these and gain
+// performance...
+/*
+ func _snmp_oids_we_care_about() []string {
+ 	return []string{
+ 		S_REMCHASSISIDSUBTYPE, S_REMCHASSISID, S_REMPORTIDSUBTYPE, S_REMPORTID,
+ 		S_REMSYSNAME, S_REMSYSDESC, S_REMSYSMANADDRSUBTYPE, S_REMSYSMANADDR,
+ 	}
+ }
+*/
 
-// TODO SNMP interface OID's --- do we care about these later, perhaps?
+// TODO(mw) SNMP interface OIDs for the local interfaces of an SNMP-capable
+// device — do we care about these later, perhaps?
 /* const (
 
         "ifnumber": ".1.3.6.1.2.1.2.1.",
@@ -172,36 +203,25 @@ func _snmp_oids_we_care_about() []string {
         "ifmac": ".1.3.6.1.2.1.2.2.1.6.",
         "ifname": ".1.3.6.1.2.1.31.1.1.1.1.",
         "ifalias": ".1.3.6.1.2.1.31.1.1.1.18."
-        )*/
+        )
 
-/*
-func snmp_lookup_chassis(host string) {
-}
+These would be useful with a function that can look up a remote SNMP host's
+chassis value, similarly to what we do with nodes running topologyd by querying
+`lldpcli show chassis` remotely from their topologyd. However, this is currently
+not used anywhere, and was not deemed necessary.
 */
 
-// SNMP-LLDP Port ID type, as defined in LLDP-MIB
+// An enum type for SNMP-LLDP Port ID, as defined in the LLDP-MIB.
 type S_LldpPortIdSubtype int
-
-// PortIDSubtype values enum
 const (
-	S_InterfaceAlias S_LldpPortIdSubtype = 1
-	S_PortComponent = iota
+	S_InterfaceAlias S_LldpPortIdSubtype = iota + 1
+	S_PortComponent
 	S_MacAddress
 	S_NetworkAddress
 	S_InterfaceName
 	S_AgentCircuitId
 	S_Local
 )
-
-// SNMP OIDs for obtaining the STP port state - from BRIDGE-MIB
-const (
-	S_STPPORTSTATE = ".1.3.6.1.2.1.17.2.15.1.3";
-)
-
-type NodeSnmpData struct {
-	ports        PortData
-	portnum      int
-}
 
 // A data structure for storing the Port Identifier as obtained by
 // snmp_collect_locport_data
@@ -216,8 +236,9 @@ type PortData struct {
 // that port's data (human readable label etc.)
 type PortDataMap map[int]PortData
 
-// snmp_collect_locport_data is the callback routine for collecting the data on
-// network ports in a BulkWalk request.
+// snmp_collect_locport_data() is the callback routine for collecting the data on
+// network ports in a BulkWalk request. Receives «dataUnit» from gosnmp,
+// «ports» from the closure calling it to store data in. Returns «err» on error.
 func snmp_collect_locport_data(dataUnit gosnmp.SnmpPDU, ports PortDataMap) (err error) {
 	var iidx int
 	if is,idx := snmp_cut(S_LOCPORTNUM, dataUnit.Name); is {
@@ -281,7 +302,11 @@ func snmp_collect_locport_data(dataUnit gosnmp.SnmpPDU, ports PortDataMap) (err 
 	return
 }
 
-// wow, lots of boilerplate and no nice way to express it!
+// snmp_collect_neighbors() is the callback routine for collecting LLDP
+// neighbors from an SNMP host. Receives «dataUnit» from gosnmp, «ports» from a
+// previous SNMP LocPort lookup, isMicrosens from a simple check against the
+// peer's MAC address to work around Microsens' firmware SNMP issues and stores
+// its results in «neighbors». Returns «err» on error.
 func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor, ports PortDataMap, isMicrosens bool) (err error) {
 	snmp_print(dataUnit)
 	n := Neighbor{ Origin: ORIGIN_SNMP }
@@ -310,13 +335,13 @@ func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor,
 		if err != nil {return err}
 
 		if idtype == 4 {
-			n.IdType = MAC_ID
+			n.IdType = IDTYPE_MAC
 		} else if idtype == 6 {
-			n.IdType = IFNAME_ID
+			n.IdType = IDTYPE_IFNAME
 		} else if idtype == 7 {
-			n.IdType = LOCAL_ID
+			n.IdType = IDTYPE_LOCAL
 		} else { /* anything else is not supported right now */
-			n.IdType = UNKNOWN_ID
+			n.IdType = IDTYPE_UNKNOWN
 		}
 		neighbors[iidx] = n
 	} else if is,idx = snmp_cut(S_REMCHASSISID, dataUnit.Name); is {
@@ -348,7 +373,7 @@ func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor,
 		if idtype != 5 {
 			log.Println("Eeep! SNMP Neighbor reported strange Port ID type:", idtype)
 		}
-		// FIXME this should be assigned in here?
+		// FIXME(mw) this should be assigned in here?
 	} else if is,idx = snmp_cut(S_REMPORTID, dataUnit.Name); is {
 		iidx, err = snmp_oid_cutval(idx, 3, 1)
 		if err != nil {return}
@@ -421,11 +446,10 @@ func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor,
 
 	// If this neighbor is found in the port information assign its SourceIface
     if neigh, found := neighbors[iidx]; iidx != 0 && is && found {
-		// FIXME is it always the last value, or only on microsens??!? check MIB and other switch impl
+		// FIXME(mw) is it always the last value, or only on microsens??!? check MIB and other switch impl
 		port, found := ports[iidx]
 		if !found {
 			return fmt.Errorf("Can't find neighbor port %d although it should be there", iidx)
-			return nil//FIXME
 		}
 		neigh.SourceIface = port.PortDesc
 		neighbors[iidx] = neigh
@@ -434,19 +458,28 @@ func snmp_collect_neighbors(dataUnit gosnmp.SnmpPDU, neighbors map[int]Neighbor,
 	return nil
 }
 
-func snmp_lookup_neighbors(host string) (res NeighborLookupResult, err error) {
-	log_snmp("=> Entering SNMP")
-	res, err = snmp_lookup_neighbors_(host)
-	log_snmp("<= Leaving SNMP")
-	return
-}
-
+// log_snmp() checks if SNMP verbose logging is enabled via ARGV. In this case,
+// it prints a formatted message «format», also passing on optional «arg...»
+// arguments to Printf.
 func log_snmp(format string, arg... interface{}) {
     if ARGV.snmp_verbose {
         log.Printf(format, arg...)
     }
 }
 
+// snmp_get_node_locport_data() queries the S_LOCPORT table from the SNMP node
+// «host», returns the PortData «ret» containing the details of the remote
+// host's network ports keyed by the port identifiers or «err» on error.
+//
+// Example return value on a microsens switch (in %+v format):
+//   map[
+//       101:{PortNum:101 PortIDSubtype:5 PortID:1/1 PortDesc:Port 1}
+//       102:{PortNum:102 PortIDSubtype:5 PortID:1/2 PortDesc:Port 2}
+//       103:{PortNum:103 PortIDSubtype:5 PortID:1/3 PortDesc:Port 3}
+//       104:{PortNum:104 PortIDSubtype:5 PortID:1/4 PortDesc:Port 4}
+//       105:{PortNum:105 PortIDSubtype:5 PortID:1/5 PortDesc:Uplink (Port 5)}
+//       106:{PortNum:106 PortIDSubtype:5 PortID:1/6 PortDesc:Downlink (Port 6)}
+//   ]
 func snmp_get_node_locport_data(host string) (ret PortDataMap, err error) {
 	log_snmp("=> Entering SNMP/LocPort Disco")
     ret, err = snmp_get_node_locport_data_(host)
@@ -454,6 +487,9 @@ func snmp_get_node_locport_data(host string) (ret PortDataMap, err error) {
 	return
 }
 
+// snmp_get_node_locport_data_() is the internal function of
+// snmp_get_node_locport_data(). Takes the same parameters but actually performs
+// the work.
 func snmp_get_node_locport_data_(host string) (ret PortDataMap, err error) {
 	snmp, err := snmp_connect(host)
 	if err != nil {return}
@@ -472,10 +508,51 @@ func snmp_get_node_locport_data_(host string) (ret PortDataMap, err error) {
 	return
 }
 
-// Discover LLDP neighbors queried from a neighbor node via SNMP
+// snmp_lookup_neighbors() queries «host» for its LLDP neighbors via SNMP.
+// Returns LLDP neighbors «res», or «err» in case of error.
+//
+// Example return value on microsens switch (in %+v format):
+//  {
+//    ns:[
+//    {
+//      Identifier:b6:fe:ef:00:00:28
+//      IdType:1
+//      Descr:DET Wayland dunfell-7.0-29-g08713e0 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64
+//      Hostname:dc3500
+//      SourceIface:Port 4
+//      SourceNeighbor:fe80::260:a7ff:fe0d:989b
+//      MgmtIPs:[fe80::b4fe:efff:fe00:28]
+//      Origin:2
+//    }
+//    {
+//      Identifier:b6:fe:ef:00:00:29
+//      IdType:1
+//      Descr:DET Wayland dunfell-7.0-29-g08713e0 (dunfell) Linux 5.4.24 #1 SMP PREEMPT Thu Oct 7 08:39:19 UTC 2021 aarch64
+//      Hostname:dc3500
+//      SourceIface:Port 3
+//      SourceNeighbor:fe80::260:a7ff:fe0d:989b
+//      MgmtIPs:[fe80::b4fe:efff:fe00:29]
+//      Origin:2
+//    }]
+//    origin:2
+//    ip:fe80::260:a7ff:fe0d:989b
+//    mac:
+//    stp:map[]
+//    snmp_locportdata: See snmp_get_node_locport_data() example
+//  }
+func snmp_lookup_neighbors(host string) (res NeighborLookupResult, err error) {
+	log_snmp("=> Entering SNMP")
+	res, err = snmp_lookup_neighbors_(host)
+	log.Printf("%+v", res)
+	log_snmp("<= Leaving SNMP")
+	return
+}
+
+// snmp_lookup_neighbors_() is the internal function of snmp_lookup_neighbors().
+// Takes the same parameters but actually performs the work.
 func snmp_lookup_neighbors_(host string) (res NeighborLookupResult, err error) {
-	// XXX it would be nice here go use GetBulk rather than BulkWalk to only
-	// fetch _snmp_oids_we_care_about() to save some traffic, on the other
+	// FIXME(mw) it would be nice here go use GetBulk rather than BulkWalk to
+	// only fetch _snmp_oids_we_care_about() to save some traffic, on the other
 	// hand there is a minimum amount of fields in 1.0.8802 we don't care about
 	// and the entire lookup finishes in 2 SNMP requests on the test setup.
 	snmp, err := snmp_connect(host)
@@ -496,7 +573,7 @@ func snmp_lookup_neighbors_(host string) (res NeighborLookupResult, err error) {
 		return
 	}
 
-	// TODO MikroTik RouterOS does not support returning multiple MgmtIP
+	// TODO(mw) MikroTik RouterOS does not support returning multiple MgmtIP
 	// addresses and (R)STP port state via SNMP. This needs to be added later in
 	// case the new switch supports it.  Seems SNMP is not quite a rigorous
 	// standard despite a bazillion pages of ASN.1 I had to BulkWalk with my
@@ -509,7 +586,7 @@ func snmp_lookup_neighbors_(host string) (res NeighborLookupResult, err error) {
 	var ret NeighborSlice
 	for _,v := range neighbors {
 		if v.IsEmpty() {continue} // a port with nothing attached
-		if len(v.MgmtIPs) == 0 && v.IdType == MAC_ID {
+		if len(v.MgmtIPs) == 0 && v.IdType == IDTYPE_MAC {
 			// This is mainly a workaround for Microsens Switches (6-Port GBE
 			// Micro Switch G6 POE+, Firmware version 12.8.0a) which have broken
 			// MgmtIP support in their SNMP/LLDP stack and do not pass MgmtIP
@@ -534,6 +611,7 @@ func snmp_lookup_neighbors_(host string) (res NeighborLookupResult, err error) {
 		ret = append(ret, v)
 	}
 
+	// wrap result in struct NeighborLookupResult
 	res = NeighborLookupResult{
 		ns:               ret,
 		origin:           ORIGIN_SNMP,
@@ -544,6 +622,10 @@ func snmp_lookup_neighbors_(host string) (res NeighborLookupResult, err error) {
 	return
 }
 
+// snmp_get_node_stp_port_state() is the callback routine for collecting STP
+// port states from an SNMP host. Receives «dataUnit» from gosnmp,
+// adding entries to the «stp_states» table, passing them back to the calling
+// closure. Returns «err» on error.
 func snmp_collect_stp_data(pdu gosnmp.SnmpPDU, stp_states map[int]int) (err error) {
 	var iidx int
 	if is,idx := snmp_cut(S_STPPORTSTATE, pdu.Name); is {
@@ -559,7 +641,20 @@ func snmp_collect_stp_data(pdu gosnmp.SnmpPDU, stp_states map[int]int) (err erro
 	return
 }
 
-// Gathers the STP port states for all ports
+// (*NeighborLookupResult).snmp_get_node_stp_port_state() queries the STP port
+// state from an SNMP host after its LLDP neighbors and local port information
+// have been queried. Returns «ret» if successful or nil on error.
+//
+// Example return value on microsens switch (in %+v format):
+//
+//   map[
+//     Downlink (Port 6):forwarding
+//     Port 1:forwarding
+//     Port 2:forwarding
+//     Port 3:forwarding
+//     Port 4:forwarding
+//     Uplink (Port 5):forwarding
+//   ]
 func (nr *NeighborLookupResult) snmp_get_node_stp_port_state() (ret PortToStateMap) {
 	snmp, err := snmp_connect(nr.ip)
 	if err != nil {
@@ -589,6 +684,9 @@ func (nr *NeighborLookupResult) snmp_get_node_stp_port_state() (ret PortToStateM
 	}
 
 	ret = make(PortToStateMap)
+	// Uses the port's PortDesc description as the port name because it's also
+	// used in the LLDP Neighbor's SourcePort information and because "Port 3"
+	// is a lot more comprehensive than random indexes like 103.
 	for k,v := range stp_states {
 		mapv, ok := mapping[v]
 		if !ok {

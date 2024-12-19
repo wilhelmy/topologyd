@@ -1,6 +1,8 @@
-// This file concerns itself with monitoring known neighbors and generating
-// warnings if the network topology changes unexpectedly.
 package topologyD
+
+// This file implements monitoring of known neighbors and generates warnings if
+// the network topology changes unexpectedly, i.e. does not match the defined
+// "quiescent state"
 
 import (
 	"bytes"
@@ -18,19 +20,27 @@ import (
 
 /**** Constants - filenames and API endpoints *****************************************/
 
+// Filenames for local data for use with datadir_file()
 const (
-	_neighbor_db_file   = "neighbor_db.json"
-	_quiescent_filename = "quiescent.json"
-	_quiescent_api_path = "/topology/quiescent"
-	_status_api_path    = "/topology/status"
-	_scan_api_path      = "/topology/scan"
+	neighbor_db_filename = "neighbor_db.json"
+	quiescent_filename   = "quiescent.json"
+)
+
+// HTTP API endpoints for monitoring.go
+const (
+	http_monitoring_quiescent_path = "/topology/quiescent"
+	http_monitoring_status_path    = "/topology/status"
+	http_monitoring_scan_path      = "/topology/scan"
 )
 
 /**** functions managing files in the data directory **********************************/
 
-// Reads the neighbor database from disk as defined in the struct above
+// read_neighbor_db_file() reads and unmarshals the neighbor database from disk
+// as defined in the struct above.
+//
+// Returns «n» on success and «err» otherwise.
 func read_neighbor_db_file() (n NeighborDB, err error) {
-	path := datadir_file(_neighbor_db_file)
+	path := datadir_file(neighbor_db_filename)
 	bytes, err := ioutil.ReadFile(path)
 	if os.IsNotExist(err) {return NeighborDB{}, nil}
 	if err != nil {return}
@@ -38,7 +48,7 @@ func read_neighbor_db_file() (n NeighborDB, err error) {
 	err = json.Unmarshal(bytes, &n)
 	if err != nil {return}
 
-	//n.Hashcode = "TODO"
+	//n.Hashcode = "TODO" // TODO(mw) implement hashcode
 	fi, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		log.Println("Neighbors database was removed immediately after writing???")
@@ -51,8 +61,12 @@ func read_neighbor_db_file() (n NeighborDB, err error) {
 	return
 }
 
-// Write a file by creating, writing and renaming a temporary file, to avoid
-// truncated files.
+// write_datadir_file() writes the contents of «buf» to file «fname» inside
+// datadir by creating, writing and renaming a temporary file, to avoid
+// truncated files. This is necessary because of all the syscalls involved, only
+// rename(2) guarantees atomicity on UNIX based operating systems.
+//
+// Returns «err» on error.
 func write_datadir_file(fname string, buf []byte) (err error) {
 	// Atomically rename a temporary file here to avoid race conditions where
 	// e.g. half of the file is written in another goroutine and garbled file
@@ -84,8 +98,13 @@ type NeighborDB struct {
 // global singleton NDB instance
 var NDB NeighborDB
 
-// Given a jgf.Graph, take all immediate neighbors this node is supposed to have
-// and add them to the NeighborDB.
+// (*NeighborDB).Import() extracts all immediate neighbors of the local host
+// from a network topology graph «g» and stores the result in «n».
+//
+// «hashcode» is currently also copied but not validated or otherwise used in
+// any way.
+//
+// Returns «err» on error.
 func (n *NeighborDB) Import(g jgf.Graph, hashcode string) (err error) {
 	n.Hashcode = hashcode
 
@@ -134,42 +153,52 @@ func (n *NeighborDB) Import(g jgf.Graph, hashcode string) (err error) {
 	return nil
 }
 
-// Write the database file to disk including the updated LastModified timestamp
-// in the struct.
+// (*NeighborDB).WriteToDisk() writes the database «n» to a file on disk
+// including an updated LastModified timestamp.
+//
+// Returns «err» on error.
 func (n *NeighborDB) WriteToDisk() (err error) {
 	n.LastModified = time.Now()
 
 	buf, err := json.Marshal(n)
 	if err != nil {return}
 
-	err = write_datadir_file(_neighbor_db_file, buf)
+	err = write_datadir_file(neighbor_db_filename, buf)
 	if err != nil {return}
 
 	return nil
 }
 
-// Returns the network hashcode for the currently defined quiescent topology.
+// (NeighborDB).GetHashcode() returns the network hashcode for the currently
+// defined quiescent topology.
 func (n NeighborDB) GetHashcode() (hashcode string) {
 	return n.Hashcode
 }
 
-// Returns true if the quiescent topology has been defined/successfully read
-// from disk because the file exists, false otherwise.
+// (NeighborDB).IsQuiescentTopologyDefined() returns true if the quiescent
+// topology has been defined or successfully read from disk because the file
+// exists, false otherwise.
 func (n NeighborDB) IsQuiescentTopologyDefined() bool {
 	// If the modification time is empty, read_neighbor_db_file() didn't return
 	// an error but an empty struct, indicating a non-existing file.
 	return n.LastModified != (time.Time{})
 }
 
-// Compares the neighbors currently returned by the locally running lldpd with
-// the neighbors that are defined as quiescent in the neighbor database.
+// (NeighborDB).CompareCurrentNeighbors compares the neighbors currently
+// returned by the locally running lldpd with the neighbors that are defined as
+// quiescent in the neighbor database.
+//
+// Since the MQTT interface for reporting the results of these monitoring cycles
+// is not yet defined, it prints the results on stdout instead.
+//
+// Returns «err» on error.
 func (n NeighborDB) CompareCurrentNeighbors() (err error) {
 	current, err := get_local_neighbors()
 	if err != nil {return}
 
 	r := n.Expected.Compare(current)
 
-	// TODO the results should be sent over a yet-to-be-defined protocol. Right
+	// TODO(mw) the results should be sent over a yet-to-be-defined protocol. Right
 	// now, they just go to the log.
 	log.Println("== Monitoring poll cycle ==")
 	log.Println("quiescent:", r.Quiescent)
@@ -182,10 +211,13 @@ func (n NeighborDB) CompareCurrentNeighbors() (err error) {
 
 /**** functions structure for handling the quiescent topology *************************/
 
-// Returns the unmarshaled jgf.Graph version of the previously defined quiescent
-// topology.
+// read_quiescent_topology() reads the quiescent topology previously defined for
+// this network from disk.
+//
+// Returns the quiescent topology «g» if previously defined, an empty «g» if the
+// file does not exist, or «err» on error.
 func read_quiescent_topology() (g jgf.Graph, err error) {
-	filename := datadir_file(_quiescent_filename)
+	filename := datadir_file(quiescent_filename)
 	data, err := ioutil.ReadFile(filename)
 	if os.IsNotExist(err) {return g, nil} // no topology previously defined
 	if err != nil {return}
@@ -197,9 +229,10 @@ func read_quiescent_topology() (g jgf.Graph, err error) {
 
 /**** Helper functions for validating and propagating API requests ********************/
 
-// Returns nil if the jgf input is valid for monitoring purposes, otherwise an Error
+// monitoring_jgf_valid() returns nil if the jgf input «g» is valid for
+// monitoring purposes, otherwise an error.
 func monitoring_jgf_valid(g jgf.Graph) (error) {
-	// TODO add more validation here
+	// TODO(mw) add more validation here
 	if g.Directed != false {
 		return fmt.Errorf("only undirected graphs are acceptable")
 	}
@@ -207,13 +240,17 @@ func monitoring_jgf_valid(g jgf.Graph) (error) {
 	return nil
 }
 
-// Contains the propagation response state as well as optionally an error
+// struct TopologyPropagationResponse is a container for reporting the
+// propagation response state as well as optionally an error as JSON.
 type TopologyPropagationResponse struct {
 	State       string    `json:"state"`
 	Error       string    `json:"error,omitempty"`
 }
 
-// monitoring_quiescent_propagate_one propagates the new quiescent topology to one host
+// monitoring_quiescent_propagate_one() propagates the new quiescent topology
+// «body» to one host on API endpoint «url».
+//
+// Returns «status» containing the result of the propagation.
 func monitoring_quiescent_propagate_one(url string, body io.ReadSeeker) (status TopologyPropagationResponse) {
 	client  := http.Client{Timeout: ARGV.http_timeout}
 
@@ -253,8 +290,13 @@ func monitoring_quiescent_propagate_one(url string, body io.ReadSeeker) (status 
 	return TopologyPropagationResponse{State: "ok", Error: ""}
 }
 
-// monitoring_quiescent_propagate forwards the information received from
-// DPT/configuration utility to all other machines as the new quiescent state
+// monitoring_quiescent_propagate() propagates the quiescent state information
+// «body» and network hashcode «hashcode» received from the network
+// configuration utility to all machines contained in the topology «g» as the
+// new quiescent state.
+//
+// Returns success status as boolean, and a map from the remote hosts' IP
+// address to their TopologyPropagationResponse.
 func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode string) (bool, map[string]TopologyPropagationResponse) {
 	results := make(map[string]TopologyPropagationResponse, len(g.Nodes)-1)
 	errors  := false
@@ -275,12 +317,12 @@ func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode st
 			log.Println("propagation: Skipping local machine", localIPs)
 			continue
 		}
-		if host == "" { // XXX drop this as soon as it's found, not here
+		if host == "" { // TODO(mw) drop this as soon as it's found, not here
 			log.Println("propagation: Skipping host without IP address (no topologyd/lldpd?)")
 			continue
 		}
 		url := http_url_attach_query_string(
-			http_make_url(host, _quiescent_api_path),
+			http_make_url(host, http_monitoring_quiescent_path),
 			"hashcode", hashcode)
 
 		// call monitoring_quiescent_propagate_one in parallel goroutines
@@ -301,26 +343,32 @@ func monitoring_quiescent_propagate(g jgf.Graph, body io.ReadSeeker, hashcode st
 	return !errors, results
 }
 
-// Given a definition of a quiescent topology, determine whether or not it
-// matches the hashcode
+// hashcode_valid() validates whether the quiescent topology «data» matches the
+// «hashcode».
+//
+// Returns true if it does and false if it does not.
 func hashcode_valid(data []byte, hashcode string) bool {
-	// TODO implement
+	// TODO(mw) implement - a hashing algorithm for quiescent topologies hasn't
+	// been invented yet.
 	return len(hashcode) > 0
 }
 
 /**** REST API Handler functions ******************************************************/
 
-// handle POST/GET/DELETE request for the "normal" topology state.
-func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
+// http_handle_topology_quiescent() handles HTTP POST/GET/DELETE API request for
+// the quiescent topology as described in the REST API documentation.
+// Parameters «w» and «req» are the usual arguments for HTTP request handlers,
+// see http library documentation.
+func http_handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 	// Buckle up, this is the longest function in here :)
 	switch req.Method {
 	case "POST":
 		break // see below switch stmt
 	case "GET":
-		http.ServeFile(w, req, datadir_file(_quiescent_filename))
+		http.ServeFile(w, req, datadir_file(quiescent_filename))
 		return
 	case "DELETE":
-		err := os.Remove(datadir_file(_quiescent_filename))
+		err := os.Remove(datadir_file(quiescent_filename))
 		if err != nil {
 			log.Println("Error deleting quiescent topology:", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -348,6 +396,7 @@ func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 	var g            jgf.Graph  // the graph passed into the POST request
 	var body       []byte       // request body
 	var err          error      // error (if any)
+//
 
 	log.Printf("HTTP POST %s, topology (re)definition request", req.URL)
 
@@ -429,7 +478,7 @@ func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 
 	// Write quiescent topology to disk (it has its own file, which contains the
 	// unmodified POST data from this request)
-	if err = write_datadir_file(_quiescent_filename, body); err != nil {
+	if err = write_datadir_file(quiescent_filename, body); err != nil {
 		statuscode = http.StatusInternalServerError
 		msg = "Error writing file"
 		log.Println(msg, "-", err)
@@ -470,7 +519,7 @@ func handle_topology_quiescent(w http.ResponseWriter, req *http.Request) {
 	return
 }
 
-// The response JSON for /topology/status
+// struct TopologyStatusResponse{} is the JSON response for /topology/status REST API
 type TopologyStatusResponse struct {
 	Hashcode      string            `json:"hashcode"`
 	Quiescent   []Neighbor          `json:"quiescent"`
@@ -479,7 +528,9 @@ type TopologyStatusResponse struct {
 	Excess      []Neighbor          `json:"excess"`
 }
 
-// Mismatch reason
+// struct Reason{} contains the mismatch reason in case an aspect of the
+// real-world topology does not match what has been previously defined as
+// quiescent topology.
 type Reason struct {
 	Key           string            `json:"key"`
 	Value         string            `json:"value"`
@@ -487,13 +538,17 @@ type Reason struct {
 	Message       string            `json:"message"`
 }
 
-// Mismatching neighbors with all mismatch reasons
+// struct NeighborWithError{} contains all Reason{}s why this neighbor is
+// registered as mismatching
 type NeighborWithError struct {
 	Neighbor      Neighbor          `json:"neighbor"`
 	Reason      []Reason            `json:"reason"`
 }
 
-// Marshal nil slices as empty JSON array rather than null
+// (TopologyStatusResponse).MarshalJSON() is a JSON Marshaling wrapper to
+// marshal nil slices as empty JSON array [] rather than JSON null values.
+//
+// Returns byte slice and error according to spec for json.Marshaler.
 func (r TopologyStatusResponse) MarshalJSON() ([]byte, error) {
 	type TSR TopologyStatusResponse
 
@@ -507,9 +562,10 @@ func (r TopologyStatusResponse) MarshalJSON() ([]byte, error) {
 	return json.Marshal(a)
 }
 
-// handle GET request for the topology state. Returns 3 sets of nodes: quiescent
-// nodes, excess nodes and missing nodes.
-func handle_topology_status(w http.ResponseWriter, req *http.Request) {
+// http_handle_topology_status() handles HTTP GET requests for the topology
+// state REST API according to REST API documentation.
+// Sends out TopologyStatusResponse formatted as JSON.
+func http_handle_topology_status(w http.ResponseWriter, req *http.Request) {
     log.Printf("Received HTTP %s from %s for %s",
 		req.Method, req.RemoteAddr, req.URL.Path)
 
@@ -548,18 +604,22 @@ func handle_topology_status(w http.ResponseWriter, req *http.Request) {
 	w.Write(response)
 }
 
+// TopologyScanResponseMember is an individual member of the /topology/scan REST API endpoint.
 type TopologyScanResponseMember struct {
 	State          string                    `json:"state"`
 	Error          string                    `json:"error,omitempty"`
 	Response      *TopologyStatusResponse    `json:"response,omitempty"`
 }
 
-// Maps primary MgmtIP to TopologyScanResponseMember
+// TopologyScanResponse maps a host's primary MgmtIP to TopologyScanResponseMember
 type TopologyScanResponse map[string]TopologyScanResponseMember
 
+// request_topology_status() requests the topology status from remote host «ip».
+//
+// Returns the response «tsr» or «err» in case of an error.
 func request_topology_status(ip string) (tsr TopologyStatusResponse, err error) {
 	client  := http.Client{Timeout: ARGV.http_timeout}
-	url := http_make_url(ip, _status_api_path)
+	url := http_make_url(ip, http_monitoring_status_path)
 	resp, err := client.Get(url)
 	if err != nil {return}
 
@@ -574,10 +634,12 @@ func request_topology_status(ip string) (tsr TopologyStatusResponse, err error) 
 	return
 }
 
-// handle_topology_scan handles the GET request for the corresponding API
-// endpoint /topology/scan. Walks the entire topology and retreives the topology
-// status from all nodes.
-func handle_topology_scan(w http.ResponseWriter, req *http.Request) {
+// handle_topology_scan() handles the HTTP GET request for the corresponding
+// REST API endpoint /topology/scan. Walks the entire network topology and
+// retreives the topology status from all hosts defined.
+// Parameters «w» and «req» are the usual arguments for HTTP request handlers,
+// see http library documentation.
+func http_handle_topology_scan(w http.ResponseWriter, req *http.Request) {
     log.Printf("Received HTTP %s from %s for %s",
 		req.Method, req.RemoteAddr, req.URL.Path)
 
@@ -637,22 +699,23 @@ func handle_topology_scan(w http.ResponseWriter, req *http.Request) {
 
 /**** main entry points for the monitoring system *************************************/
 
-// main function of the monitoring goroutine (which runs in parallel to the REST
-// API handlers at an interval defined via ARGV - see main()), which verifies
-// all expected neighbors are present in regular intervals and reports missing
-// ones over a yet-to-be-defined interface (TODO).
+// monitoring_tick() is the main function of the monitoring goroutine (which
+// runs in parallel to the REST API handlers at an interval defined via ARGV —
+// see Main()), which verifies all expected neighbors are present in regular
+// intervals and reports missing ones over a yet-to-be-defined interface.
 func monitoring_tick() {
 	if err := NDB.CompareCurrentNeighbors(); err != nil {
 		log.Printf("Error comparing neighbors: %s", err)
 	}
 }
 
-// monitoring_init registers http handlers in the global http handlers map and
-// reads in the neighbor database
+// monitoring_init() runs on topologyd start-up, registers the http handlers
+// from this file in the global http handlers map and reads in the neighbor
+// database.
 func monitoring_init() {
-    http_handlers [_quiescent_api_path] = handle_topology_quiescent
-	http_handlers [_status_api_path]    = handle_topology_status
-	http_handlers [_scan_api_path]      = handle_topology_scan
+    http_handlers [http_monitoring_quiescent_path] = http_handle_topology_quiescent
+	http_handlers [http_monitoring_status_path   ] = http_handle_topology_status
+	http_handlers [http_monitoring_scan_path     ] = http_handle_topology_scan
 
 	var err error
 	NDB, err = read_neighbor_db_file()

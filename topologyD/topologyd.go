@@ -1,5 +1,8 @@
-// main file of topologyd. Contains glue code, main logic and HTTP handling.
+// package topologyD contains all application logic of topologyd.
 package topologyD
+
+// This is the main file of topologyd. It contains glue code, Main() logic and
+// HTTP handling.
 
 import (
 	"bytes"
@@ -21,6 +24,8 @@ import (
 
 /**** Commandline arguments section ***************************************************/
 
+// Command line arguments are stored in this global struct for use everywhere in
+// the program after getting parsed in Main()
 var ARGV struct {
     // Listen port for HTTP queries
     port                  int
@@ -72,30 +77,45 @@ var ARGV struct {
 
 
 /**** Debug section *******************************************************************/
+
+// DEBUG: Set to true to enable verbose HTTP requests
 const dbg_http_query_verbose = false
 
 /**** Constants ***********************************************************************/
-const lldp_neighbor_path = "/lldp/neighbors"
-const lldp_chassis_path  = "/lldp/chassis"
-const stp_port_state_path= "/stp/port_state"
-const graphviz_path      = "/topology/graphviz"
-const jgf_path           = "/topology/jgf"
+
+// HTTP API endpoint constants for topologyd.go
+const (
+    http_lldp_neighbor_path  = "/lldp/neighbors"
+    http_lldp_chassis_path   = "/lldp/chassis"
+    http_stp_port_state_path = "/stp/port_state"
+    http_graphviz_path       = "/topology/graphviz"
+    http_jgf_path            = "/topology/jgf"
+)
 
 /**** HTTP code ***********************************************************************/
 
+// This global map contains a mapping of HTTP paths to HTTP handler functions,
+// it gets filled by the various *init() functions in other subsystems and is
+// then passed on to the HTTP server in Main().
 var http_handlers = make(map[string]http.HandlerFunc)
-// init is called once at program start before main()
+
+// init() is called once by the go runtime at program start before main().
+// It adds http handlers for topologyd.go to the aforementioned http_handlers map.
 func init() {
-    http_handlers [lldp_neighbor_path]  = handle_lldp_request
-    http_handlers [lldp_chassis_path]   = handle_lldp_request
-    http_handlers [stp_port_state_path] = handle_stp_request
-    http_handlers [graphviz_path]       = handle_graphviz_request
-    http_handlers [jgf_path]            = handle_jgf_request
+    http_handlers [http_lldp_neighbor_path]  = http_handle_lldp
+    http_handlers [http_lldp_chassis_path]   = http_handle_lldp
+    http_handlers [http_stp_port_state_path] = http_handle_stp
+    http_handlers [http_graphviz_path]       = http_handle_graphviz
+    http_handlers [http_jgf_path]            = http_handle_jgf
 }
 
-// Handler function for incoming HTTP requests to query the local node's
-// chassis or neighbor info
-func handle_lldp_request(w http.ResponseWriter, req *http.Request) {
+// http_handle_lldp() handles incoming HTTP requests to query the local node's
+// lldpd chassis or neighbor info from lldpd.
+// Parameters «w» and «req» are the usual arguments for HTTP requests, see http
+// library documentation.
+//
+// Returns nothing because it handles errors internally and logs them.
+func http_handle_lldp(w http.ResponseWriter, req *http.Request) {
     log.Printf("Received HTTP GET from %s for %s", req.RemoteAddr, req.URL.Path)
     reqName := strings.TrimPrefix(req.URL.Path, "/lldp/")
     switch reqName {
@@ -120,9 +140,13 @@ func handle_lldp_request(w http.ResponseWriter, req *http.Request) {
     }
 }
 
-// Handler function for incoming HTTP requests to resolve the network topology
-// and return the result in graphviz format
-func handle_graphviz_request(w http.ResponseWriter, req *http.Request) {
+// http_handle_graphviz() handles incoming HTTP requests to resolve the local
+// node's network neighborhood topology graph in graphviz format.
+// Parameters «w» and «req» are the usual arguments for HTTP requests, see http
+// library documentation.
+//
+// Returns nothing because it handles errors internally and logs them.
+func http_handle_graphviz(w http.ResponseWriter, req *http.Request) {
     start, neighbors := gather_neighbors_from_nodes()
 
     if neighbors == nil || start == "" {
@@ -140,9 +164,13 @@ func handle_graphviz_request(w http.ResponseWriter, req *http.Request) {
     }
 }
 
-// Handler function for incoming HTTP requests to resolve the network topology
-// and return the result in JSON Graph Format
-func handle_jgf_request(w http.ResponseWriter, req *http.Request) {
+// http_handle_jgf() handles incoming HTTP requests to resolve the network
+// topology and return the result in JGF (JSON Graph Format).
+// Parameters «w» and «req» are the usual arguments for HTTP requests, see http
+// library documentation.
+//
+// Returns nothing because it handles errors internally and logs them.
+func http_handle_jgf(w http.ResponseWriter, req *http.Request) {
     start, neighbors := gather_neighbors_from_nodes()
 
     if neighbors == nil || start == "" {
@@ -160,9 +188,14 @@ func handle_jgf_request(w http.ResponseWriter, req *http.Request) {
     }
 }
 
-// Handler function for incoming HTTP queries to the STP API
-func handle_stp_request(w http.ResponseWriter, req *http.Request) {
-    res := STP_get_port_state_json(ARGV.netif_link_local_ipv6)
+// http_handle_stp() handles incoming HTTP queries to the STP API. Returns the
+// local host's STP port state.
+// Parameters «w» and «req» are the usual arguments for HTTP requests, see http
+// library documentation.
+//
+// Returns nothing because it handles errors internally and logs them.
+func http_handle_stp(w http.ResponseWriter, req *http.Request) {
+    res := stp_get_port_state_json(ARGV.netif_link_local_ipv6)
 
     if len(res) == 0 {
         log.Printf("Request for '%s': Internal Server Error, "+
@@ -177,17 +210,10 @@ func handle_stp_request(w http.ResponseWriter, req *http.Request) {
     }
 }
 
-// Given an IPv6 address, returns the same IPv6 address with %zone attached if
-// required
-func fix_linklocal(host string) string {
-    if ip := net.ParseIP(host); ip.IsLinkLocalUnicast() {
-        return ip.String() + "%" + ARGV.netif_link_local_ipv6
-    }
-    return host
-}
-
-// http_make_url turns a host and path into a full URL by adding IPv6LL zone and
-// port number, and wrapping IPv6 addresses in angle brackets
+// http_make_url() turns a «host» and «path» into a full URL by adding IPv6LL zone and
+// port number, and wrapping IPv6 addresses in angle brackets.
+//
+// Returns the new «url».
 func http_make_url(host string, path string) (url string) {
     port := ARGV.port
     zone := ""
@@ -204,7 +230,10 @@ func http_make_url(host string, path string) (url string) {
     return
 }
 
-// Given an URL, serializes value into query string
+// http_url_attach_query_string() takes an URL «uri» and adds the «key» «value»
+// pair into the HTTP query string, e.g. "?key=value" with appropriate escaping.
+//
+// Returns the new URL as a string.
 func http_url_attach_query_string(uri string, key string, value string) string {
     u, _ := url.Parse(uri) // discarding error, don't use function with untrusted input
     v := u.Query()
@@ -213,9 +242,11 @@ func http_url_attach_query_string(uri string, key string, value string) string {
     return u.String()
 }
 
-// Send HTTP GET requests to specified node, logs errors and discards malformed
-// responses to keep the rest of the logic clean - expects JSON response from
-// Server
+// http_get() sends HTTP GET requests to specified topologyd «host» API path
+// «path», logs errors and discards malformed responses to keep the rest of the
+// logic clean. It expects a JSON response from the remote API endpoint.
+//
+// Returns the response «body» as a byte slice on success and «err» on error.
 func http_get(host string, path string) (body []byte, err error) {
     if host == "" {
         log.Printf("http_get called with empty host")
@@ -258,19 +289,23 @@ func http_get(host string, path string) (body []byte, err error) {
 }
 
 /**** LLDP-HTTP interface *************************************************************/
-// HTTP GET request wrapper for the LLDP neighbors URL. Returns the parsed JSON
-// as a slice of struct Neighbor wrapped in struct NeighborLookupResult.
+
+// http_get_node_neighbor_info() fetches the LLDP neighbors from remote host
+// «host» via that host's topologyd HTTP API.
+//
+// Returns the parsed JSON as «res» wrapped in struct NeighborLookupResult, and
+// «err» in case of an error.
 func http_get_node_neighbor_info(host string) (res NeighborLookupResult, err error) {
     if host == "" {
         err = fmt.Errorf("http_get_node_neighbor_info called on empty string")
         return
     }
-    data, err := http_get(host, lldp_neighbor_path)
+    data, err := http_get(host, http_lldp_neighbor_path)
 
     var neighbors NeighborSlice
 
     if data == nil {
-        err = fmt.Errorf("HTTP GET %s on '%s' failed: %w", lldp_neighbor_path, host, err)
+        err = fmt.Errorf("HTTP GET %s on '%s' failed: %w", http_lldp_neighbor_path, host, err)
         return
     } else {
         // parse result as JSON
@@ -291,15 +326,22 @@ func http_get_node_neighbor_info(host string) (res NeighborLookupResult, err err
         ns:     neighbors,
         origin: ORIGIN_TOPOLOGYD,  // also set its origin here on the response level
         ip:     host,
-        // TODO add chassis data here
+        // TODO(mw) add chassis data here? This would add the need to do one
+        // extra remote HTTP or SNMP lookup per remote host.  Currently
+        // mirror_mirror_on_the_wall() is used instead of a separate lookup of
+        // remote chassis values, which might also make the program slower due
+        // to network latency.
     }
     return res, err
 }
 
-// HTTP GET on the chassis URL for a given host, pull MgmtIP out of the chassis
-// data which was returned
+// http_get_host_mgmt_ip() sends a HTTP GET request to query the chassis data
+// via the topologyd HTTP API from a given «host», extracts the MgmtIP «ret»
+// out of the data which was received.
+//
+// Returns the remote host's MgmtIP or an empty string on error.
 func http_get_host_mgmt_ip(host string) (ret string) {
-    data, _ := http_get(host, lldp_chassis_path)
+    data, _ := http_get(host, http_lldp_chassis_path)
     if data == nil { return }
 
     chassis, err := lldp_parse_chassis_data(data)
@@ -308,30 +350,41 @@ func http_get_host_mgmt_ip(host string) (ret string) {
         return
     }
 
-    ret, err = get_suitable_mgmt_ip(chassis.MgmtIPs)
+    ret, err = chassis.MgmtIPs.get_suitable_mgmt_ip()
     if err != nil {
         log.Printf("Error getting MgmtIP: %s %+v", err, chassis)
     }
     return
 }
 
-// Queries STP port state from host
+// http_get_node_stp_port_state() queries the STP port state from «host» via the
+// topology HTTP API.
+//
+// Returns the result as a populated PortToStateMap «ret» on success,
+// or nil on error.
 func http_get_node_stp_port_state(host string) (ret PortToStateMap) {
-    data, _ := http_get(host, stp_port_state_path)
+    data, _ := http_get(host, http_stp_port_state_path)
     if data == nil { return nil }
 
-    ret = STP_parse_port_state_json(data)
+    ret = stp_parse_port_state_json(data)
     return
 }
 
-// return text surrounded by terminal attribute for enable/disable bold font
-func bold(x string) string {
-    return "\033[1;1m" + x + "\033[0;0m"
+// bold() formats «text» surrounded by VT102 terminal attribute for
+// enable/disable bold font to print bold text on the terminal.
+//
+// Returns the bold text.
+func bold(text string) string {
+    return "\033[1;1m" + text + "\033[0;0m"
 }
 
-
-// Send HTTP GET request to obtain STP state from neighbor, or SNMP request if
-// the neighbor was obtained through SNMP
+// (*NeighborLookupResult).gather_node_stp_state() sends a HTTP GET request to
+// obtain STP state from that neighbor's topologyd API, or an SNMP request for
+// that host's STP port states if the NeighborLookupResult was obtained through
+// SNMP. The result is stored in the struct NeighborLookupResult on which the
+// method is called.
+//
+// Returns «err» on error.
 func (nr *NeighborLookupResult) gather_node_stp_state() (err error) {
     if nr.stp != nil {
         return fmt.Errorf("neighbor link state is already populated: %v", nr)
@@ -351,29 +404,41 @@ func (nr *NeighborLookupResult) gather_node_stp_state() (err error) {
 // Map keyed by primary MgmtIP to that node's Neighbors and other info
 type NodeMap map[string]NeighborLookupResult
 
-// look up the STP state for all nodes
+// (*NodeMap).gather_stp_states() iterates over all NeighborLookupResults in the
+// map and retreives their STP port states. The result is stored back in the
+// map «n».
 func (n *NodeMap) gather_stp_states() {
+    // TODO this loop should run in parallel goroutines
     for k, node := range *n {
         node.gather_node_stp_state()
+        // it's legal to modify existing map entries while looping
         (*n)[k] = node
     }
 }
 
-// Wrapper for verbose log messages used by the neighbor gathering process
+// log_gather() is a wrapper function for verbose log messages used by the
+// neighbor gathering process if verbose logging for the gathering process is
+// enabled in ARGV. Takes a «format» string and extra «arg...» arguments for
+// log.Printf().
 func log_gather(format string, arg... interface{}) {
     if ARGV.gather_verbose {
         log.Printf(format, arg...)
     }
 }
 
-// Send HTTP GET or SNMP requests to obtain neighbors from hosts and handle
-// errors
+// get_node_neighbors() queries the LLDP neighbors from host «ip» either by
+// topologyd's HTTP API or by the equivalent SNMP method if the HTTP connection
+// failed because the remote host appears not to be running topologyd and SNMP
+// is enabled via ARGV. Logs errors internally.
+//
+// Returns the resulting data «ret» or nil on error.
 func get_node_neighbors(ip string) (ret NeighborLookupResult) {
     ret, err := http_get_node_neighbor_info(ip)
 
-    // XXX will make an attempt to contact the node via SNMP iff the connection
-    // on the topologyd port was refused or the HTTP connection times out.
-    // This is a somewhat dirty heuristic.
+    // FIXME(mw) this will make an attempt to contact the node via SNMP iff the
+    // connection on the topologyd port was refused or the HTTP connection times
+    // out. This is a somewhat dirty heuristic, but I don't have any better idea
+    // for detecting topologyd.
     if ARGV.gather_snmp &&
         (errors.Is(err, syscall.ECONNREFUSED) || os.IsTimeout(err)) {
 
@@ -388,9 +453,19 @@ func get_node_neighbors(ip string) (ret NeighborLookupResult) {
     return
 }
 
-// Crawl the entire network for LLDP neighbors and STP state, returning a Map of
-// node name (== management IP) to NeighborSource, which in turn contains
-// interface name, STP state and neighbors found on the interface.
+// gather_neighbors_from_nodes() crawls the entire network for LLDP neighbors
+// and in succession their STP port state, starting from ARGV.start_host
+// (default: localhost). It does so by creating a todo list by multicast-ping
+// on the IPv6 global multicast IP to refresh the kernel's NDP table with all
+// hosts responding to the ping and adding all entries from the table to the
+// list. It then queries all LLDP neighbor nodes from each of the IP addresses
+// in the todo list, either via the topologyd API or — if unavailable — SNMP.
+// If a previously unseen host is found as a neighbor in one of the host's LLDP
+// neighbors, it is added at the back of the todo list.
+//
+// Returns the start host as well as a Map of keyed by primary management IP to
+// struct NeighborLookupResult, a container struct for the node's LLDP
+// neighbors, STP port state and extra information.
 func gather_neighbors_from_nodes() (string, *NodeMap) {
     // hashmap keyed by MgmtIP addresses, also used for tracking whether or not
     // a node has been queried before by setting its value to nil
@@ -408,12 +483,12 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
     if err != nil {log.Println(err)} // Continue anyway
     // Add all hosts found in table to the todo list
     for _, v := range macToIpMap {
-        smi, err := get_suitable_mgmt_ip(v)
+        smi, err := MgmtIPs(v).get_suitable_mgmt_ip()
         if err != nil {log.Println(err); continue}
         todo = append(todo, smi)
     }
 
-    // TODO this loop should run in parallel, see file:todo.org::*Parallelize
+    // TODO(mw) this loop should run in parallel, see file:todo.org::*Parallelize
     //
     // loop over these nodes (in parallel goroutines) to get their LLDP
     // neighbors - either via topologyd's JSON API or if unavailable SNMP
@@ -427,14 +502,14 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
         log_gather(bold("Processing #%d (host %s), todo list: %v"), iter, ip, todo)
 
         nres := get_node_neighbors(ip)
-        if len(nres.ns) < 1 {continue} // node reports no neighbors, skip for now... FIXME
+        if len(nres.ns) < 1 {continue} // TODO(mw) node reports no neighbors, skip for now...
 
         neighbors[ip] = nres
 
         for i, neigh := range nres.ns { // loop over all found neighbors
             log_gather("Neighbor (%d/%d): %+v", i+1, len(nres.ns), neigh)
 
-            newip, err := get_suitable_mgmt_ip(neigh.MgmtIPs)
+            newip, err := neigh.MgmtIPs.get_suitable_mgmt_ip()
             if err != nil {
                 log.Printf("gather: machine %s: failed to get management IP: %s", ip, err)
                 continue
@@ -443,7 +518,9 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
             // the hashtable is dual-use to prevent duplicating lookups to
             // previously looked-up todo list entries
             if _, found := neighbors[newip]; !found {
-                // initialize hashtable location to nil for deduplication
+                // Initialize hashtable location to an empty NLR{Origin: 42}.
+                // Unique value 42 chosen for debugging, report a bug if it ever
+                // shows up anywhere.
                 neighbors[newip] = NeighborLookupResult{origin: 42}
                 todo = append(todo, newip)
             }
@@ -460,15 +537,26 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
     return start, &neighbors
 }
 
-// Given a primary MgmtIP address, find information about that host as seen by
-// any one of its peers that knows about it
+// (*NodeMap).mirror_mirror_on_the_wall() attempts to find detailed information
+// about a primary MgmtIP address «node». Because the detailed information is
+// never looked up directly from the node itself (via the chassis HTTP API
+// endpoint or SNMP) but only ever seen through the "mirror image" as seen by
+// one of its neighbors, this function iterates over all neighbors of «node» and
+// attempts to look it up from that neighbor's LLDP data.
+//
+// Returns the node's information if found, or an empty struct otherwise.
+//
+// FIXME(mw) this function does not discriminate between Neighbors originating
+// from a remote topologyd or SNMP switch, however the information received via
+// SNMP is often less reliable depending on the network switches used, so it
+// should probably prefer topologyd if both are available.
 func (ns *NodeMap) mirror_mirror_on_the_wall(node string) Neighbor {
     node_neighbors := (*ns)[node]
     if len(node_neighbors.ns) == 0 {return Neighbor{}} // a hermit has no neighbors
 
     for _, peer := range node_neighbors.ns {
         if peer.IsEmpty() {continue} // I never introduced myself when I moved in
-        peer_ip, err := get_suitable_mgmt_ip(peer.MgmtIPs)
+        peer_ip, err := peer.MgmtIPs.get_suitable_mgmt_ip()
         if err != nil {continue}
         peer_neighbors := (*ns)[peer_ip]
 
@@ -480,8 +568,13 @@ func (ns *NodeMap) mirror_mirror_on_the_wall(node string) Neighbor {
     return Neighbor{}
 }
 
-// Given 2 neighbors, iff they're directly connected, returns the "inferior"
-// PortState (i.e. smaller value of the PortState enum) of the two.
+// (*NodeMap).stp_link_state() receives two MgmtIP addresses for neighbor nodes
+// «node» and «peer» as its arguments. The STP port state is based on ports, not
+// links, but in order to e.g.  mark a link that has been disabled by STP in the
+// graph, a "link state" has to be determined. This function calculates the
+// smaller value of the two PortState enum values.
+//
+// Returns this "link state" if available, or logs an error and returns Unknown.
 func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
     // all neighbors reported by node and peer
     node_neighbors := (*ns)[node].ns
@@ -502,7 +595,7 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
         return Unknown
     }
 
-    // FIXME if the same neighbor can be seen on multiple interfaces, this
+    // FIXME(mw) if the same neighbor can be seen on multiple interfaces, this
     // breaks. On a ring topology, the only case is two nodes connected in a
     // ring. Evaluate under which other circumstances this can happen in other
     // topologies.
@@ -517,8 +610,11 @@ func (ns *NodeMap) stp_link_state(node string, peer string) PortState {
     }
 }
 
-// Given two nodes, returns the name of the network interfaces on which source
-// sees target
+// (NodeMap).GetSourceIface() takes primary MgmtIPs of two nodes «source» and
+// «target».
+//
+// Returns the name of the network interface on which source is connected to
+// target on the source side.
 func (ns NodeMap) GetSourceIface(source string, target string) *string {
     sn := ns[source]
     if t, found := sn.ns.find_neighbor_by_ip(target); !found {
@@ -532,7 +628,11 @@ func (ns NodeMap) GetSourceIface(source string, target string) *string {
     }
 }
 
-// generates graphviz output view for the graph
+// (NodeMap).generate_graphviz() generates a graphviz document output view for
+// the graph, starting from «start» node, by iterating the «nodes» previously
+// discovered.
+//
+// Returns a *bytes.Buffer which is suitable for a HTTP response.
 func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     var buf bytes.Buffer
 
@@ -554,7 +654,7 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
             "Hostname: %s (origin=%d)\\n"+
             "%s identifier: %s\\n"+
             "IP: %s\"]",
-            //TODO escape strings
+            //TODO(mw) escape strings
             node.Label,
             color,
             meta.Hostname, meta.Origin,
@@ -602,13 +702,17 @@ func generate_graphviz(start string, nodes *NodeMap) *bytes.Buffer {
     return &buf
 }
 
-// Returns a filename suitable for opening/writing within topologyd's data
-// directory
+// datadir_file() prepends topologyd's data directory to the beginning of
+// «filename».
+//
+// Returns a path for this filename located inside topologyd's data directory.
 func datadir_file(filename string) string {
     return strings.Join([]string{ARGV.data_dir, filename}, "/")
 }
 
-/**** Main loop ***********************************************************************/
+// Main() is the topologyd main function. It parses commandline arguments,
+// initializes the SNMP and monitoring subsystems, starts the monitoring
+// goroutine and the HTTP server.
 func Main() {
     // add file name + line number to log output
     log.SetFlags(log.LstdFlags | log.Lshortfile)
