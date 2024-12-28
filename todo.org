@@ -2,7 +2,8 @@
 #+TODO: TODO(t) PROJ(p) LOOP(r) STRT(s) WAIT(w) HOLD(h) IDEA(i) | DONE(d) KILL(k) "[ ]"(T) [-](S) [?](W) | [X](D) | OKAY(o) YES(y) NO(n)
 
 * TODO Authentication
-We probably will just use IPSec/MACsec because we need/want it elsewhere anyway
+We probably will just use IPSec/MACsec because we need/want it elsewhere anyway.
+Might also want to add TLS (client certificates?) later.
 * DONE Is a simple HTTP REST service otherwise sufficient as a wire protocol?
 It probably is, but it might also make sense to think about it and use the same
 protocol as the rest of the stack, such as ZeroMQ/protobuf, should we decide to
@@ -26,16 +27,21 @@ So the solution should probably be to add a couple of quick HTTP retries and
 define some failure conditions (such as, after how many seconds of the machine
 not reappearing because of a spurious reboot or something similar, should a
 failure condition be reported?)
-* PROJ Parallelize GET requests with goroutines?
-** HTTP GET requests, while not particularly slow, have gotten a sibling now, SNMP BulkWalk requests.
+* DONE Parallelize GET requests with goroutines?
+HTTP GET requests, while not particularly slow, have gotten a sibling now, SNMP BulkWalk requests.
 
 SNMP responses can take forever (e.g. 20 seconds per switch if the switch
 responds slowly), even for small amounts of data like querying LLDP neighbors.
 
 Therefore these requests should be parallelized for all members of the todo list
-in [[file:topologyd.go::func gather_neighbors_from_nodes]] as soon as its main loop
-loops
-* WAIT Handle "500 internal server error" if lldpcli can't be executed on the machine?
+in [[file:topologyD/topologyd.go::func gather_neighbors_from_nodes]] as soon as its
+main loop loops.
+
+This is now implemented for both HTTP and SNMP requests.
+
+* NO Handle "500 internal server error" if lldpcli can't be executed on the machine?
+This is not technically a bug, topologyd being unable to execute lldpcli is in
+fact an internal server error.
 #+NAME: HTTP request for `lldpcli show chassis` code
 #+begin_src shell :results output :exports both :eval never-export
 curl -v localhost:9090/lldp/chassis 2>&1 | tr -d \\r

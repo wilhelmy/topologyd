@@ -408,11 +408,23 @@ type NodeMap map[string]NeighborLookupResult
 // map and retreives their STP port states. The result is stored back in the
 // map «n».
 func (n *NodeMap) gather_stp_states() {
-    // TODO this loop should run in parallel goroutines
+    channels := make(map[string]chan NeighborLookupResult, len(*n))
+    i := 1
     for k, node := range *n {
-        node.gather_node_stp_state()
+        channels[k] = make(chan NeighborLookupResult)
+        go func(i int, node NeighborLookupResult, out chan NeighborLookupResult) {
+            log_gather("Worker %d for '%s' starting", i, k)
+            node.gather_node_stp_state()
+            out<- node
+            log_gather("Worker %d done", i)
+        }(i, node, channels[k])
+        i++
+    }
+
+    // read nodes from the channels and assign them back into the map
+    for k, chanode := range channels {
         // it's legal to modify existing map entries while looping
-        (*n)[k] = node
+        (*n)[k] = <-chanode
     }
 }
 
@@ -477,7 +489,7 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
     iter := 0
     ip := start
 
-    // Get all hosts that respond to broadcast ping from the kernel's NDP table
+    // Get all hosts that respond to broadcast ping from the kernel's NDP table.
     icmp6_ping_broadcast(ARGV.netif_link_local_ipv6)
     macToIpMap, err := ndp_get_neighbors(ARGV.netif_link_local_ipv6)
     if err != nil {log.Println(err)} // Continue anyway
@@ -488,10 +500,10 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
         todo = append(todo, smi)
     }
 
-    // TODO(mw) this loop should run in parallel, see file:todo.org::*Parallelize
-    //
-    // loop over these nodes (in parallel goroutines) to get their LLDP
-    // neighbors - either via topologyd's JSON API or if unavailable SNMP
+    // Loop over the nodes found so far in parallel goroutines to get their LLDP
+    // neighbors — either via topologyd's JSON API or (if unavailable) SNMP.
+    channels := make(map[string]chan NeighborLookupResult)
+repeat:
     for len(todo) > 0 {
         ip, todo = todo[0], todo[1:]
         if v, found := neighbors[ip]; found && v.ip == ip { // check to see if it isn't empty
@@ -501,12 +513,35 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
         iter++
         log_gather(bold("Processing #%d (host %s), todo list: %v"), iter, ip, todo)
 
-        nres := get_node_neighbors(ip)
-        if len(nres.ns) < 1 {continue} // TODO(mw) node reports no neighbors, skip for now...
+        // Make a channel for communication with the goroutine.
+        channel := make(chan NeighborLookupResult)
+        channels[ip] = channel
+        go func(iter int, ip string){
+            // FIXME(mw) this closure runs in parallel, which means that log
+            // messages from log_gather/log.Println etc. will not be in order.
+            // Add a log channel and rewrite all the other code to log to the
+            // channel instead?
+            // Set a different default logger for each goroutine?
+            log_gather("Worker %d for '%s' starting", iter, ip)
+            channel<- get_node_neighbors(ip)
+            close(channel)
+            log_gather("Worker %d done", iter)
+        }(iter, ip)
+    }
+
+    // Loop over all goroutine result channels.
+    // This works without using a WaitGroup because every channel produces
+    // exactly one result (an empty one in case of an error). Channels block
+    // until their value is read, so adding a WaitGroup proved to be more
+    // trouble than just reading from all channels simultaneously.
+    for ip, chanres := range channels {
+        nres := <-chanres
+
+        if len(nres.ns) < 1 {continue} // node reports no neighbors, skip for now...
 
         neighbors[ip] = nres
 
-        for i, neigh := range nres.ns { // loop over all found neighbors
+        for i, neigh := range nres.ns { // loop over all neighbors found
             log_gather("Neighbor (%d/%d): %+v", i+1, len(nres.ns), neigh)
 
             newip, err := neigh.MgmtIPs.get_suitable_mgmt_ip()
@@ -525,6 +560,11 @@ func gather_neighbors_from_nodes() (string, *NodeMap) {
                 todo = append(todo, newip)
             }
         }
+    }
+    // if new todo items have appeared, gather again with the updated todo list.
+    if len(todo) > 0 {
+        log_gather("Unresolved hosts were found in remote neighbors, repeating.")
+        goto repeat
     }
     log_gather("== End gathering neighbors ==")
 
